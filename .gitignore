@@ -17,6 +17,7 @@ src-tauri/gen/android/app/tauri.properties
 src-tauri/gen/android/app/src/main/jniLibs/
 
 # Копии тестовых ассетов для site-WebView (источник — public/, копирует android:patch)
+src-tauri/gen/android/app/src/main/assets/blank.html
 src-tauri/gen/android/app/src/main/assets/test-page.html
 src-tauri/gen/android/app/src/main/assets/test-video.mp4
 src-tauri/gen/android/app/src/main/assets/heliwatch-assets.sha256

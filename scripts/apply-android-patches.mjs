@@ -432,12 +432,13 @@ async function writeBrandingResources() {
 }
 
 async function copySiteAssets() {
+  await copyAsset('blank.html');
   await copyAsset('test-page.html');
   await copyAsset('test-video.mp4');
 }
 
 async function hashAssets() {
-  const pairs = ['test-page.html', 'test-video.mp4'];
+  const pairs = ['blank.html', 'test-page.html', 'test-video.mp4'];
   const rows = [];
   for (const name of pairs) {
     const bytes = await readFile(path.join(assetsDir, name));

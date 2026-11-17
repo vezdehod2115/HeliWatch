@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, type ChangeEvent, type KeyboardEvent } from 'react';
 import { Icon } from '../../app/icons';
 import type { ChatMessage } from '../../net/protocol';
 import type { ChatTransfer } from '../../stores/chat';
@@ -15,6 +15,11 @@ interface ChatPanelProps {
   recents: string[];
   saveHistory: boolean;
   notice: string | null;
+  /**
+   * В режиме «Сайт» чат стоит под видео-окном, а не накрывает его целиком:
+   * видео остаётся сверху, сообщения прокручиваются в оставшейся области.
+   */
+  docked?: boolean;
   onDraft: (text: string) => void;
   onSend: () => void;
   onClose: () => void;
@@ -134,6 +139,7 @@ export function ChatPanel({
   recents,
   saveHistory,
   notice,
+  docked = false,
   onDraft,
   onSend,
   onClose,
@@ -172,7 +178,11 @@ export function ChatPanel({
   };
 
   return (
-    <section className="hw-chatpanel" data-hw-region="chat" aria-label="Чат комнаты">
+    <section
+      className={`hw-chatpanel${docked ? ' hw-chatpanel--docked' : ''}`}
+      data-hw-region="chat"
+      aria-label="Чат комнаты"
+    >
       <header className="hw-chathead">
         <button
           type="button"

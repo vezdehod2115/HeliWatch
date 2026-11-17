@@ -24,7 +24,7 @@ pnpm android:doctor       # проверяет, что ничего не пот�
 | `app/src/main/res/values/hw_branding.xml` | цвета окна и иконки |
 | `app/src/main/res/drawable/hw_icon_foreground.xml` | вектор знака H-плеер |
 | `app/src/main/res/mipmap-anydpi-v26/ic_launcher*.xml` | адаптивная иконка + monochrome |
-| `app/src/main/assets/` | копии `public/test-page.html`, `public/test-video.mp4`, sha256-манифест |
+| `app/src/main/assets/` | копии `public/blank.html`, `public/test-page.html`, `public/test-video.mp4`, sha256-манифест |
 
 `scripts/icons.mjs` (`pnpm icons`) вызывает `tauri icon` из
 `docs/branding/icon-source.png`; PNG-иконки `mipmap-*` обновляются в
@@ -74,6 +74,9 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
    `HeliWatchBridge.handleIntent(intent)` (маркер `HW:PATCH:INTENT`).
 5. Сайт стартует с прозрачной заглушки; React при монтировании шлёт
    `site_init` (исходник `site-hook.js`) и `site_load` (тестовая страница).
+   С 0.8.1 по умолчанию открывается пустая `blank.html` с зелёным градиентом
+   темы: тестовая страница осталась диагностическим ассетом и в комнате не
+   показывается.
 6. SQLite открывается из JS через `@tauri-apps/plugin-sql`; миграции
    (`src-tauri/src/db.rs`) регистрируются в Rust-плагине `tauri-plugin-sql` с
    feature `sqlite` и применяются при `Database.load('sqlite:heliwatch.db')`.

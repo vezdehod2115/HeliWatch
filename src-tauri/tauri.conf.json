@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "HeliWatch",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "identifier": "dev.heliwatch.app",
   "build": {
     "frontendDist": "../dist",
@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "android": {
-      "versionCode": 800,
+      "versionCode": 801,
       "debugApplicationIdSuffix": ".debug"
     }
   }

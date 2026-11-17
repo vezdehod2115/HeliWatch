@@ -1,7 +1,7 @@
 {
   "name": "heliwatch",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "HeliWatch — совместный просмотр видео с голосом и чатом, Android (Tauri v2)",
   "type": "module",
   "license": "MIT",

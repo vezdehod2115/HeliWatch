@@ -26,7 +26,13 @@ import { ImageViewer } from '../chat/ImageViewer';
 import { RemoteAudio } from '../voice/RemoteAudio';
 import { imageUrlFromBytes, prepareImage, type PreparedImage } from '../chat/imagePrep';
 import type { SiteController } from '../site/useSiteController';
-import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl, sendSiteCommand } from '../../native/siteBridge';
+import {
+  BLANK_URL,
+  TEST_PAGE_URL,
+  YOUTUBE_URL,
+  normalizeUrl,
+  sendSiteCommand,
+} from '../../native/siteBridge';
 import type { LocalProfile } from '../../db/repo/identity';
 import { LOBBY_ROOM_ID, roomLink } from '../../net/protocol';
 import {
@@ -136,7 +142,6 @@ const DEFAULT_REACTION_X = 0.5;
 const DEFAULT_REACTION_Y = 0.62;
 /** Поиск (этап 8): тап по окну без видео открывает Google. */
 const GOOGLE_URL = 'https://www.google.com/';
-const GOOGLE_SEARCH_URL = 'https://www.google.com/search?q=';
 const WINDOW_RADIUS = 18;
 
 function sampleFromView(view: PlaybackView, action: PlaybackAction): PlaybackSample {
@@ -178,7 +183,8 @@ export function RoomScreen({
   const settings = useSettingsStore();
   const [localView, setLocalView] = useState<PlaybackView>(EMPTY_VIEW);
   const [localFile, setLocalFile] = useState<LocalFile | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  // Нижняя панель плеера по умолчанию свёрнута: в комнате главное — видео и чат.
+  const [collapsed, setCollapsed] = useState(true);
   const [reactionsOpen, setReactionsOpen] = useState(false);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
@@ -271,6 +277,7 @@ export function RoomScreen({
   const lastRectRef = useRef<VideoWindowRect | null>(null);
   const resumePlaybackRef = useRef<() => void>(() => undefined);
   const nextQueueRef = useRef<() => void>(() => undefined);
+  const chatOpenedOnce = useRef(false);
 
   notifyRef.current = notify;
   onLeaveRef.current = onLeave;
@@ -1342,7 +1349,7 @@ export function RoomScreen({
       isBanned: (userId) => blockedRef.current.has(userId),
       initialUrl:
         role === 'host' && (initialMode ?? 'site') === 'site'
-          ? siteRef.current.status.url || TEST_PAGE_URL
+          ? siteRef.current.status.url || BLANK_URL
           : undefined,
     });
     clientRef.current = client;
@@ -1392,6 +1399,18 @@ export function RoomScreen({
     // Параметры комнаты фиксируются при монтировании: смена кода — новый экран.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Сайт в комнате: чат открыт по умолчанию, видео идёт сверху, чат — под ним.
+  useEffect(() => {
+    if (chatOpenedOnce.current || snapshot.phase !== 'joined' || snapshot.mode !== 'site') {
+      return;
+    }
+    chatOpenedOnce.current = true;
+    const store = useChatStore.getState();
+    if (!store.open) {
+      store.setOpen(true);
+    }
+  }, [snapshot.phase, snapshot.mode]);
 
   // События страницы: действия пользователя на сайте уходят в комнату.
   useEffect(
@@ -1518,6 +1537,8 @@ export function RoomScreen({
               browseRef.current = false;
               setBrowse(false);
               lastWindowSig.current = '';
+              // Возвращаемся в комнату — чат снова открыт под видео.
+              useChatStore.getState().setOpen(true);
             }, 700);
           }
         }
@@ -2215,24 +2236,6 @@ export function RoomScreen({
     publishQueueState([], 0);
   };
 
-  const searchSite = (query: string): void => {
-    if (!selfHost) {
-      notifyRef.current('Ссылку выбирает хост комнаты');
-      return;
-    }
-    const text = query.trim();
-    const url = text ? `${GOOGLE_SEARCH_URL}${encodeURIComponent(text)}` : GOOGLE_URL;
-    void siteRef.current.openUrl(url);
-  };
-
-  const openBrowsePage = (url: string): void => {
-    if (!selfHost) {
-      notifyRef.current('Ссылку выбирает хост комнаты');
-      return;
-    }
-    void siteRef.current.openUrl(url);
-  };
-
   /** Тап по окну без видео: меню комнаты скрываются, открывается поиск. */
   const enterBrowse = (): void => {
     if (modeRef.current !== 'site') {
@@ -2261,6 +2264,7 @@ export function RoomScreen({
     if (!/^https:\/\/(www\.)?google\./i.test(urlRef.current)) {
       void siteRef.current.openUrl(GOOGLE_URL);
     }
+    notifyRef.current('Найдите видео на сайте — вернёмся в комнату автоматически');
   };
 
   /** Возврат в комнату из поиска: без выбранного видео — прежняя страница. */
@@ -2280,6 +2284,7 @@ export function RoomScreen({
       void siteRef.current.openUrl(target);
     }
     lastWindowSig.current = '';
+    useChatStore.getState().setOpen(true);
   };
 
   const handleWindowRect = useCallback((rect: VideoWindowRect): void => {
@@ -2495,7 +2500,11 @@ export function RoomScreen({
 
       <div className={`hw-mid${pipActive ? ' hw-mid--pip' : ''}`}>
         {snapshot.mode === 'site' ? (
-          <main className={`hw-stage${browse ? ' hw-stage--browse' : ''}`}>
+          <main
+            className={`hw-stage${
+              browse ? ' hw-stage--browse' : ' hw-stage--window'
+            }`}
+          >
             {!pipActive && !browse && waiting && (
               <div className="hw-roomwait" data-hw-region="roomwait">
                 <span className="hw-spinner" aria-hidden="true" />
@@ -2580,6 +2589,7 @@ export function RoomScreen({
             recents={chat.recents}
             saveHistory={chat.saveHistory}
             notice={chat.notice}
+            docked={snapshot.mode === 'site'}
             onDraft={onDraft}
             onSend={sendChat}
             onClose={() => useChatStore.getState().setOpen(false)}
@@ -2681,20 +2691,7 @@ export function RoomScreen({
         />
       )}
 
-      {!pipActive && browse && (
-        <BrowseOverlay
-          url={site.status.url}
-          title={site.status.title}
-          found={siteVideo.found}
-          playing={siteVideo.playing}
-          onBack={() => exitBrowse(true)}
-          onSearch={searchSite}
-          onGoogle={() => openBrowsePage(GOOGLE_URL)}
-          onYoutube={() => openBrowsePage(YOUTUBE_URL)}
-          onWatchHere={() => exitBrowse(false)}
-          onAddToQueue={addCurrentToQueue}
-        />
-      )}
+      {!pipActive && browse && <BrowseOverlay onBack={() => exitBrowse(true)} />}
 
       {!pipActive && (
         <RoomQueue

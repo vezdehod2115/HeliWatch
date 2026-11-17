@@ -5,6 +5,11 @@ import type { RegionPayload } from './regions';
 
 /** Локальная тестовая страница лежит в assets APK (см. apply-android-patches.mjs). */
 export const TEST_PAGE_URL = 'file:///android_asset/test-page.html';
+/**
+ * Пустая страница комнаты: ровный зелёный фон вместо тестовой страницы.
+ * Пока хост не выбрал сайт, за прозрачным React-слоем не должно быть контента.
+ */
+export const BLANK_URL = 'file:///android_asset/blank.html';
 export const YOUTUBE_URL = 'https://m.youtube.com/';
 
 export type SiteUnlisten = () => void;

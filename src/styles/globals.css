@@ -3670,102 +3670,78 @@
   color: rgb(234 247 242 / 0.5);
 }
 
+/* ---------- Комната: видео сверху, чат под ним (этап 8.1) ---------- */
+
+.hw-stage--window {
+  flex: none;
+  display: block;
+  padding: 6px 10px 4px;
+  overflow: visible;
+}
+
+.hw-stage--window .hw-videowindow {
+  margin: 0 auto;
+  max-height: 46vh;
+}
+
+.hw-stage--window .hw-roomwait {
+  margin: 10px auto;
+}
+
+.hw-stage--browse {
+  flex: 1;
+  display: block;
+  padding: 0;
+}
+
+/*
+ * В режиме «Сайт» чат не накрывает видео целиком: он встаёт под окном и
+ * занимает оставшуюся высоту. Видео остаётся сверху, сообщения — ниже.
+ */
+.hw-chatpanel--docked {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  animation: none;
+}
+
 /* ---------- Поиск на весь экран ---------- */
 
-.hw-browse {
+/*
+ * Этап 8.1: из React в режиме поиска остаётся только компактная кнопка
+ * возврата. Никакой поисковой строки и подсказок поверх сайта — они налезали
+ * на шапку Google. Искать нужно на самом сайте, назад вернут кнопка и
+ * системный back.
+ */
+.hw-browse-fab {
   position: absolute;
   left: calc(var(--hw-safe-left) + 10px);
-  right: calc(var(--hw-safe-right) + 10px);
-  top: calc(var(--hw-safe-top) + 8px);
+  bottom: calc(var(--hw-safe-bottom) + 14px);
   z-index: 35;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  pointer-events: none;
-}
-
-.hw-browse-bar {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px;
-  border-radius: 16px;
+  height: 40px;
+  padding: 0 14px 0 11px;
+  border-radius: 999px;
+  background: rgb(4 24 22 / 0.94);
   border: 1px solid var(--color-hw-line-strong);
-  background: rgb(4 24 22 / 0.96);
-  box-shadow: var(--shadow-hw-panel);
-  backdrop-filter: blur(16px);
-  pointer-events: auto;
-}
-
-.hw-browse-back {
-  width: 38px;
-  height: 38px;
-  flex: none;
-}
-
-.hw-browse-search {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 38px;
-  padding: 0 10px;
-  border-radius: 12px;
-  background: rgb(2 16 15 / 0.72);
-  color: var(--color-hw-muted);
-}
-
-.hw-browse-input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  outline: none;
-  background: transparent;
   color: var(--color-hw-ink);
-  font-size: 13px;
-}
-
-.hw-browse-row {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  overflow-x: auto;
-  padding: 0 2px;
-  pointer-events: auto;
-  scrollbar-width: none;
-}
-
-.hw-browse-row::-webkit-scrollbar {
-  display: none;
-}
-
-.hw-browse-row .hw-chip {
-  flex: none;
-}
-
-.hw-browse-page {
-  flex: 1;
-  min-width: 0;
-  font-size: 10.5px;
-  color: var(--color-hw-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hw-browse-hint {
-  margin: 0;
-  padding: 6px 10px;
-  border-radius: 12px;
-  background: rgb(4 24 22 / 0.8);
-  border: 1px solid rgb(var(--hw-accent-rgb) / 0.12);
-  font-size: 10.5px;
-  line-height: 1.35;
-  color: var(--color-hw-muted);
+  font-size: 12px;
+  font-weight: 650;
+  box-shadow: var(--shadow-hw-panel);
   pointer-events: auto;
 }
+
+.hw-browse-fab:active {
+  background: var(--color-hw-accent-soft);
+  border-color: rgb(var(--hw-accent-rgb) / 0.6);
+}
+
 
 /* ---------- Очередь видео ---------- */
 

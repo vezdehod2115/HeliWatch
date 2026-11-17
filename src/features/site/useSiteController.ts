@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  BLANK_URL,
   TEST_PAGE_URL,
   YOUTUBE_URL,
   captureBack,
@@ -91,7 +92,9 @@ export function useSiteController(): SiteController {
         }));
       }
       if (!disposed) {
-        await openSite(TEST_PAGE_URL);
+        // Этап 8.1: на старте — пустая зелёная страница, а не тестовая.
+        // Тестовая остаётся только диагностическим ассетом и не открывается.
+        await openSite(BLANK_URL);
       }
     };
 

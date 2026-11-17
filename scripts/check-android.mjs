@@ -228,7 +228,7 @@ async function checkResources() {
 }
 
 async function checkAssets() {
-  const names = ['test-page.html', 'test-video.mp4'];
+  const names = ['blank.html', 'test-page.html', 'test-video.mp4'];
   for (const name of names) {
     const source = path.join(root, 'public', name);
     const target = path.join(mainDir, 'assets', name);
