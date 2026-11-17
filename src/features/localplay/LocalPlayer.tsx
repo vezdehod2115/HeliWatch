@@ -17,6 +17,8 @@ export interface LocalPlayerHandle {
   duration: () => number;
   /** Громкость 0…1: ducking приглушает локальный файл, пока кто-то говорит. */
   setVolume: (volume: number) => void;
+  /** Размер кадра: пропорции окна PiP (этап 4). */
+  dimensions: () => { width: number; height: number };
 }
 
 interface LocalPlayerProps {
@@ -122,6 +124,13 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
           if (video) {
             video.volume = Math.min(1, Math.max(0, volume));
           }
+        },
+        dimensions: () => {
+          const video = videoRef.current;
+          return {
+            width: video?.videoWidth ?? 0,
+            height: video?.videoHeight ?? 0,
+          };
         },
       }),
       [],

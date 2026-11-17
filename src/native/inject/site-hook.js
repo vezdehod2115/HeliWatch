@@ -38,6 +38,7 @@
     video: null,
     applyingUntil: 0,
     lastTimePost: 0,
+    pipStyle: false,
   };
 
   function now() {
@@ -182,6 +183,46 @@
     });
   }
 
+  /**
+   * PiP (этап 4): класс `hw-pip` на <html> и один стиль на страницу.
+   * Стиль прячет чужие контролы, которые в маленьком окне перекрывают видео
+   * (нижняя панель YouTube и градиенты). Инжект при этом не перезагружается.
+   */
+  function ensurePipStyle() {
+    if (state.pipStyle) {
+      return;
+    }
+    try {
+      var style = document.createElement('style');
+      style.id = '__heliwatch_pip';
+      style.textContent =
+        'html.hw-pip,html.hw-pip body{background:transparent !important;}' +
+        'html.hw-pip video{object-fit:contain !important;}' +
+        'html.hw-pip .ytp-chrome-bottom,html.hw-pip .ytp-chrome-top,' +
+        'html.hw-pip .ytp-gradient-bottom,html.hw-pip .ytp-gradient-top,' +
+        'html.hw-pip .ytp-pause-overlay,html.hw-pip .ytp-unmute,' +
+        'html.hw-pip .hw-pip-hide{display:none !important;opacity:0 !important;}';
+      (document.head || document.documentElement).appendChild(style);
+      state.pipStyle = true;
+    } catch (error) {
+      /* старая страница — просто класс, без стиля */
+    }
+  }
+
+  function setPipMode(on) {
+    try {
+      ensurePipStyle();
+      if (on) {
+        document.documentElement.classList.add('hw-pip');
+      } else {
+        document.documentElement.classList.remove('hw-pip');
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function boot() {
     scan();
     try {
@@ -219,6 +260,7 @@
       reportPage();
       return true;
     },
+    setPip: setPipMode,
     apply: function (cmd) {
       try {
         if (!cmd || typeof cmd !== 'object') {

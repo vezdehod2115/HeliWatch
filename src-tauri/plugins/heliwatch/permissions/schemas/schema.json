@@ -295,6 +295,42 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the keep_screen_on command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-keep-screen-on",
+          "markdownDescription": "Enables the keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the keep_screen_on command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-keep-screen-on",
+          "markdownDescription": "Denies the keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pip_enter command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pip-enter",
+          "markdownDescription": "Enables the pip_enter command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pip_enter command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pip-enter",
+          "markdownDescription": "Denies the pip_enter command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pip_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pip-update",
+          "markdownDescription": "Enables the pip_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pip_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pip-update",
+          "markdownDescription": "Denies the pip_update command without any pre-configured scope."
+        },
+        {
           "description": "Enables the register_listener command without any pre-configured scope.",
           "type": "string",
           "const": "allow-register-listener",
@@ -317,6 +353,54 @@
           "type": "string",
           "const": "deny-remove-listener",
           "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-info",
+          "markdownDescription": "Enables the session_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-info",
+          "markdownDescription": "Denies the session_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-start",
+          "markdownDescription": "Enables the session_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-start",
+          "markdownDescription": "Denies the session_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-stop",
+          "markdownDescription": "Enables the session_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-stop",
+          "markdownDescription": "Denies the session_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-update",
+          "markdownDescription": "Enables the session_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the session_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-session-update",
+          "markdownDescription": "Denies the session_update command without any pre-configured scope."
         },
         {
           "description": "Enables the site_cmd command without any pre-configured scope.",
@@ -391,10 +475,10 @@
           "markdownDescription": "Denies the site_regions command without any pre-configured scope."
         },
         {
-          "description": "Базовые разрешения HeliWatch: управление сайтом, тач-роутинг и события\n#### This default permission set includes:\n\n- `allow-site-init`\n- `allow-site-load`\n- `allow-site-nav`\n- `allow-site-cmd`\n- `allow-site-regions`\n- `allow-site-info`\n- `allow-register-listener`\n- `allow-remove-listener`",
+          "description": "Базовые разрешения HeliWatch: сайт, тач-роутинг, события, PiP и фон\n#### This default permission set includes:\n\n- `allow-site-init`\n- `allow-site-load`\n- `allow-site-nav`\n- `allow-site-cmd`\n- `allow-site-regions`\n- `allow-site-info`\n- `allow-pip-update`\n- `allow-pip-enter`\n- `allow-session-start`\n- `allow-session-update`\n- `allow-session-stop`\n- `allow-session-info`\n- `allow-keep-screen-on`\n- `allow-register-listener`\n- `allow-remove-listener`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Базовые разрешения HeliWatch: управление сайтом, тач-роутинг и события\n#### This default permission set includes:\n\n- `allow-site-init`\n- `allow-site-load`\n- `allow-site-nav`\n- `allow-site-cmd`\n- `allow-site-regions`\n- `allow-site-info`\n- `allow-register-listener`\n- `allow-remove-listener`"
+          "markdownDescription": "Базовые разрешения HeliWatch: сайт, тач-роутинг, события, PiP и фон\n#### This default permission set includes:\n\n- `allow-site-init`\n- `allow-site-load`\n- `allow-site-nav`\n- `allow-site-cmd`\n- `allow-site-regions`\n- `allow-site-info`\n- `allow-pip-update`\n- `allow-pip-enter`\n- `allow-session-start`\n- `allow-session-update`\n- `allow-session-stop`\n- `allow-session-info`\n- `allow-keep-screen-on`\n- `allow-register-listener`\n- `allow-remove-listener`"
         }
       ]
     }

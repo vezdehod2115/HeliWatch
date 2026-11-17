@@ -9,6 +9,9 @@ export interface VideoInfo {
   duration: number;
   rate: number;
   muted: boolean;
+  /** Размер кадра: пропорции окна PiP (этап 4). */
+  width: number;
+  height: number;
 }
 
 export interface SiteNotice {
@@ -71,6 +74,8 @@ export const EMPTY_STATUS: SiteStatus = {
     duration: 0,
     rate: 1,
     muted: false,
+    width: 0,
+    height: 0,
   },
   fullscreen: false,
   lastTap: null,

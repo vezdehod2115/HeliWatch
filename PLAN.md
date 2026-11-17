@@ -27,7 +27,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 | 1 | Каркас: Tauri/Android, два WebView, тач-роутинг, тема, лого, README, CHANGELOG | 0.1.0 | ✅ завершён | 17.11.2026 | debug APK собран; проверка на телефонах и скриншоты — по чеклисту из README |
 | 2 | P2P-комнаты, identity, синхронизация сайта и локальных файлов | 0.2.3 | ✅ завершён | 17.11.2026 | 0.2.1: 16-КБ `.so`; 0.2.3: контейнер не добавляет Tauri-WebView в конструкторе (JNI abort); nonce-аутентификация, режимы A/C, автокоррекция |
 | 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ✅ завершён | 17.11.2026 | 0.3.0: голос с replaceTrack без renegotiation, индикатор речи и ducking, чат с typing и историей по желанию, фото чанками 16 КиБ по `hw-blob`, эмодзи и 8 быстрых реакций |
-| 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ⬜ не начат | — | — |
+| 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ✅ завершён | 17.11.2026 | 0.4.0: PiP с тремя RemoteAction, автовход на Android 12+ и `onUserLeaveHint` на 8–11; foreground-сервис mediaPlayback → microphone; TimerGuard (`onResume` + `resumeTimers` после `super`); `FLAG_KEEP_SCREEN_ON`; строка сообщения и тикающее время в PiP |
 | 5 | Стрим файла с телефона хоста | 0.5.0 | ⬜ не начат | — | — |
 | 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ⬜ не начат | — | — |
 | 7 | Друзья, DM, статистика, бэкап, динамический акцент, age-gate | 0.7.0 | ⬜ не начат | — | — |
@@ -99,9 +99,10 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 - JS получает событие `pip-mode` → React переключается в компактный слой (скрыты панели, чат, адресная строка; остаётся видео + полоса последнего сообщения), сайту ставится класс `hw-pip` (стиль скрывает его собственные контролы), инжект не перезагружается.
 - Тач-роутинг в PiP отключён (всё гасится) — системный тап по окну разворачивает приложение.
 - `setPictureInPictureParams`: `aspectRatio` из пропорций текущего видео (сайт сообщает `videoWidth/videoHeight`), `sourceRectHint` — прямоугольник видео в координатах окна; на Android 12+ `setAutoEnterEnabled(true)` и вход делает система, на 11 и ниже — `enterPictureInPictureMode()` из `onUserLeaveHint()`, в обоих случаях только при `roomActive`.
-- `RemoteAction`: пауза/плей, мут микрофона, вернуться. Клик → `PendingIntent` → broadcast-receiver в плагине → `trigger('pip-action')` → React выполняет и присылает `update_pip_state` для актуальных иконок.
+- `RemoteAction`: пауза/плей, мут микрофона, вернуться. Клик → `PendingIntent` → broadcast-receiver в плагине → `trigger('pip-action')` → React выполняет и присылает `pip_update` для актуальных иконок.
 - **Таймеры:** Tauri/`WryActivity.onPause()` может вызвать `webView.onPause()` и `pauseTimers()` (глобально для процесса). MainActivity после `super.onPause()`/`super.onStop()` при `roomActive` вызывает `onResume()` + `resumeTimers()` для обоих WebView. Корректность проверяется спайком на реальных телефонах: счётчик `setInterval`, DataChannel-пинг и аудио-уровень в PiP и в фоне (этап 4), а не догадками.
 - В фоне без PiP процесс держит foreground-сервис (`mediaPlayback`, микрофон — только после выдачи RECORD_AUDIO и явного включения микрофона, повторным `startForeground`).
+- **Реализовано в 0.4.0:** `PiPController` (auto-enter, RemoteAction пауза/микрофон/развернуть, `sourceRectHint` по пропорциям видео), `SessionService` + `SessionNotification` + `MediaActionReceiver`, `TimerGuard`; компактный слой `src/features/pip/PipLayer.tsx` — строка последнего сообщения и тикающее время в комнате: счётчик виден в PiP и служит проверкой, что `setInterval` не замирает.
 
 ### 2.5 Динамический акцент: путь цвета
 

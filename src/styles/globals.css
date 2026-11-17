@@ -2051,3 +2051,76 @@
     transform: scale(1.15);
   }
 }
+
+/* ==================== Этап 4: PiP, фон, сервис ==================== */
+
+/*
+ * PiP-слой: панели не рендерятся, остаётся видео (сайт — нативный WebView под
+ * прозрачным React, файл — <video> в React) и строка сообщения снизу.
+ * Фон не задаём: в режиме «Сайт» сквозь React должен быть виден сайт.
+ */
+.hw-app--pip .hw-mid {
+  flex: 1;
+}
+
+.hw-mid--pip {
+  justify-content: center;
+}
+
+/* В маленьком окне собственные контролы локального плеера не нужны. */
+.hw-app--pip .hw-player-file,
+.hw-app--pip .hw-player-empty,
+.hw-app--pip .hw-player-play {
+  display: none;
+}
+
+.hw-pipline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px calc(8px + var(--hw-safe-bottom));
+  background: linear-gradient(180deg, rgb(4 18 16 / 0), rgb(4 18 16 / 0.88) 62%);
+  color: #eaf7f2;
+  font-size: 12px;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+.hw-pipline-mic {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgb(255 132 148 / 0.16);
+  border: 1px solid rgb(255 132 148 / 0.4);
+  color: var(--color-hw-danger);
+}
+
+.hw-pipline-mic.is-on {
+  background: var(--color-hw-accent-soft);
+  border-color: var(--color-hw-line-strong);
+  color: var(--color-hw-accent);
+}
+
+.hw-pipline-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+}
+
+.hw-pipline-time {
+  flex: none;
+  color: rgb(234 247 242 / 0.62);
+  font-variant-numeric: tabular-nums;
+}
+

@@ -2,13 +2,16 @@ package dev.heliwatch
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -39,6 +42,9 @@ object HeliWatchBridge {
   private var siteRef: WebView? = null
   private var tauriRef: WebView? = null
   private var pluginRef: HeliWatchPlugin? = null
+
+  /** PiP-контроллер создаётся вместе с контейнером (этап 4). */
+  private var pipRef: PiPController? = null
 
   private var hookSource: String? = null
   private var fileLauncher: ActivityResultLauncher<Intent>? = null
@@ -127,6 +133,10 @@ object HeliWatchBridge {
     tauriWebView.isFocusable = true
     tauriWebView.isFocusableInTouchMode = true
     transparent(tauriWebView)
+
+    // PiP и таймеры: контроллер знает пропорции текущего видео из session_pip_update.
+    pipRef = PiPController(host, { containerRef }) { inPip -> onPipModeChanged(inPip) }
+    TimerGuard.register(site, tauriWebView)
 
     // Пока React не прислал инжект, показываем прозрачную заглушку.
     site.loadDataWithBaseURL(
@@ -323,11 +333,173 @@ object HeliWatchBridge {
 
   fun onActivityPause() {
     siteRef?.onPause()
+    TimerGuard.setForeground(false)
+    // WryActivity.onPause() уже вызвал Tauri-WebView.onPause(); в PiP и в фоне
+    // комната должна продолжать жить — будим оба WebView и таймеры процесса.
+    TimerGuard.keepAlive()
     runCatching { CookieManager.getInstance().flush() }
   }
 
   fun onActivityResume() {
+    TimerGuard.setForeground(true)
     siteRef?.onResume()
+    pipRef?.apply()
+  }
+
+  /** После super.onStop(): WebView не должны замирать, пока комната активна. */
+  fun onActivityStop() {
+    TimerGuard.setForeground(false)
+    TimerGuard.keepAlive()
+  }
+
+  // ---------- PiP (этап 4) ----------
+
+  fun updatePip(state: JSObject?) {
+    // PiPController сам разбирает снимок и обновляет SessionState.
+    pipRef?.update(state)
+  }
+
+  fun enterPip(): JSObject = JSObject().apply {
+    val controller = pipRef
+    if (controller == null) {
+      put("ok", false)
+      put("error", "PiP недоступен: контейнер ещё не готов")
+      return@apply
+    }
+    val ok = controller.enter()
+    put("ok", ok)
+    controller.lastError?.let { put("error", it) }
+  }
+
+  /** MainActivity.onUserLeaveHint: на Android 11 и ниже PiP входит отсюда. */
+  fun onUserLeaveHint() {
+    pipRef?.onUserLeaveHint()
+  }
+
+  /** MainActivity.onPictureInPictureModeChanged. */
+  fun onPictureInPictureModeChanged(inPip: Boolean) {
+    pipRef?.onModeChanged(inPip)
+  }
+
+  private fun onPipModeChanged(inPip: Boolean) {
+    containerRef?.setPipMode(inPip)
+    setSitePipClass(inPip)
+    if (inPip) {
+      // PiP-окно живёт поверх других приложений: таймеры и видео не усыпляем.
+      siteRef?.onResume()
+    }
+    emitEvent(JSObject().apply {
+      put("t", "pip-mode")
+      put("on", inPip)
+    })
+  }
+
+  private fun setSitePipClass(on: Boolean) {
+    // page-hook добавляет класс hw-pip и стиль, скрывающий чужие контролы.
+    val flag = if (on) "true" else "false"
+    val script =
+      "(function(){try{if(window.__heliwatch&&typeof window.__heliwatch.setPip==='function')" +
+        "return window.__heliwatch.setPip($flag);" +
+        "document.documentElement.classList.${if (on) "add" else "remove"}('hw-pip');" +
+        "return true;}catch(e){return false;}})();"
+    siteRef?.evaluateJavascript(script, null)
+  }
+
+  // ---------- Комната в фоне: сервис, уведомление, экран ----------
+
+  fun startSession(activity: Activity, state: JSObject?): JSObject {
+    state?.let { applySessionState(it) }
+    SessionState.roomActive = true
+    val context = activity.applicationContext
+    if (!HeliWatchPermissions.hasNotifications(context)) {
+      // Android 13+: без разрешения уведомление не видно, но сервис работает.
+      HeliWatchPermissions.requestNotifications(activity)
+    }
+    val error = SessionService.start(context)
+    pipRef?.apply()
+    return JSObject().apply {
+      put("ok", error == null)
+      if (error != null) {
+        put("error", error)
+      }
+      put("notifications", HeliWatchPermissions.hasNotifications(context))
+    }
+  }
+
+  fun updateSession(state: JSObject?) {
+    state?.let { applySessionState(it) }
+    val context = activityRef?.get()?.applicationContext ?: return
+    SessionService.update(context)
+  }
+
+  fun stopSession() {
+    SessionState.roomActive = false
+    val context = activityRef?.get()?.applicationContext
+    if (context != null) {
+      SessionService.stop(context)
+    }
+    // Комната закончилась (в том числе кнопкой в уведомлении): если открыто
+    // PiP-окно, оно больше не показывает видео — выходим из него.
+    pipRef?.exit()
+    pipRef?.release()
+    setKeepScreenOn(false)
+    setSitePipClass(false)
+    SessionState.reset()
+  }
+
+  fun setKeepScreenOn(on: Boolean) {
+    val activity = activityRef?.get() ?: return
+    runCatching {
+      if (on) {
+        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+      } else {
+        activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+      }
+    }.onFailure { Log.w(TAG, "FLAG_KEEP_SCREEN_ON", it) }
+  }
+
+  fun sessionInfo(): JSObject {
+    val context = activityRef?.get()
+    val pipSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+      context?.packageManager?.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) == true
+    return JSObject().apply {
+      put("pipSupported", pipSupported)
+      put("inPip", pipRef?.isInPip ?: false)
+      put("notifications", context != null && HeliWatchPermissions.hasNotifications(context))
+      put("mic", context != null && HeliWatchPermissions.hasAudio(context))
+      put("serviceRunning", SessionService.isRunning)
+      put("roomActive", SessionState.roomActive)
+      put("sdk", Build.VERSION.SDK_INT)
+    }
+  }
+
+  /** Кнопки PiP и уведомления приходят из MediaActionReceiver. */
+  fun onMediaAction(action: String, source: String) {
+    emitEvent(JSObject().apply {
+      put("t", "pip-action")
+      put("action", action)
+      put("source", source)
+    })
+  }
+
+  fun onServiceError(message: String) {
+    emitError(message)
+  }
+
+  private fun applySessionState(state: JSObject) {
+    SessionState.update(
+      code = state.getString("code", SessionState.code),
+      title = state.getString("title", SessionState.title),
+      mode = state.getString("mode", SessionState.mode),
+      playing = if (state.has("playing")) state.optBoolean("playing", SessionState.playing) else null,
+      micOn = if (state.has("micOn")) state.optBoolean("micOn", SessionState.micOn) else null,
+      message = if (state.has("message")) state.optString("message", SessionState.message) else null,
+      width = state.optInt("videoWidth", 0).takeIf { it > 0 },
+      height = state.optInt("videoHeight", 0).takeIf { it > 0 },
+    )
+    if (state.has("roomActive")) {
+      SessionState.roomActive = state.optBoolean("roomActive", SessionState.roomActive)
+    }
   }
 
   fun destroy() {
@@ -336,12 +508,15 @@ object HeliWatchBridge {
     backCallback = null
     pendingFileCallback?.onReceiveValue(null)
     pendingFileCallback = null
+    stopSession()
+    pipRef = null
     siteRef?.destroy()
     siteRef = null
     containerRef = null
     tauriRef = null
     pluginRef = null
     pendingEvents.clear()
+    TimerGuard.clear()
   }
 
   // ---------- Внутреннее ----------

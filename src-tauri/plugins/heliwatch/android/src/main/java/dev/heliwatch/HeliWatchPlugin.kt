@@ -37,6 +37,10 @@ class HeliWatchPlugin(
     HeliWatchBridge.onActivityResume()
   }
 
+  override fun onStop(activity: AppCompatActivity) {
+    HeliWatchBridge.onActivityStop()
+  }
+
   override fun onDestroy(activity: AppCompatActivity) {
     HeliWatchBridge.destroy()
   }
@@ -92,6 +96,53 @@ class HeliWatchPlugin(
   @Command
   fun siteInfo(invoke: Invoke) {
     invoke.resolve(HeliWatchBridge.info())
+  }
+
+  // ---------- Этап 4: фон, PiP, сервис ----------
+
+  /** Снимок комнаты для PiP: пропорции видео, состояние кнопок, сообщение. */
+  @Command
+  fun pipUpdate(invoke: Invoke) {
+    HeliWatchBridge.updatePip(invoke.getArgs().getJSObject("state"))
+    invoke.resolve()
+  }
+
+  /** Ручной вход в PiP из панели комнаты. */
+  @Command
+  fun pipEnter(invoke: Invoke) {
+    invoke.resolve(HeliWatchBridge.enterPip())
+  }
+
+  /** Комната открыта: foreground-сервис, запрос уведомлений, автовход в PiP. */
+  @Command
+  fun sessionStart(invoke: Invoke) {
+    invoke.resolve(
+      HeliWatchBridge.startSession(hostActivity, invoke.getArgs().getJSObject("state")),
+    )
+  }
+
+  @Command
+  fun sessionUpdate(invoke: Invoke) {
+    HeliWatchBridge.updateSession(invoke.getArgs().getJSObject("state"))
+    invoke.resolve()
+  }
+
+  @Command
+  fun sessionStop(invoke: Invoke) {
+    HeliWatchBridge.stopSession()
+    invoke.resolve()
+  }
+
+  @Command
+  fun sessionInfo(invoke: Invoke) {
+    invoke.resolve(HeliWatchBridge.sessionInfo())
+  }
+
+  /** Экран не гаснет, пока идёт воспроизведение (FLAG_KEEP_SCREEN_ON). */
+  @Command
+  fun keepScreenOn(invoke: Invoke) {
+    HeliWatchBridge.setKeepScreenOn(invoke.getArgs().getBoolean("on", false))
+    invoke.resolve()
   }
 
   companion object {

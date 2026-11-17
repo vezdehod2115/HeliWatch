@@ -12,6 +12,7 @@
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <!-- HW:PATCH:ACTIVITY -->
         <activity
+            android:supportsPictureInPicture="true"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density"

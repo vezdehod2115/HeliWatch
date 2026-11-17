@@ -5,6 +5,13 @@ const COMMANDS: &[&str] = &[
     "site_cmd",
     "site_regions",
     "site_info",
+    "pip_update",
+    "pip_enter",
+    "session_start",
+    "session_update",
+    "session_stop",
+    "session_info",
+    "keep_screen_on",
     "register_listener",
     "remove_listener",
 ];

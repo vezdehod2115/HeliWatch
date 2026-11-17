@@ -148,6 +148,11 @@ async function checkManifest() {
     manifest.includes('android:windowSoftInputMode="adjustResize"'),
   );
   check('resizeableActivity=true', manifest.includes('android:resizeableActivity="true"'));
+  check(
+    'supportsPictureInPicture=true (этап 4)',
+    manifest.includes('android:supportsPictureInPicture="true"'),
+    'без этого enterPictureInPictureMode бросает IllegalStateException',
+  );
   check('scheme heliwatch объявлен', /<data\s+android:scheme="heliwatch"/.test(manifest));
   check('label приложения = app_name', manifest.includes('android:label="@string/app_name"'));
 }
@@ -173,6 +178,20 @@ async function checkMainActivity() {
     'onNewIntent → HeliWatchBridge.handleIntent',
     content.includes('override fun onNewIntent(') &&
       content.includes('HeliWatchBridge.handleIntent(intent)'),
+  );
+  check(
+    'маркеры HW:PATCH:PIP',
+    content.includes('// HW:PATCH:PIP:BEGIN') && content.includes('// HW:PATCH:PIP:END'),
+  );
+  check(
+    'onUserLeaveHint → HeliWatchBridge (PiP на Android 11 и ниже)',
+    content.includes('override fun onUserLeaveHint()') &&
+      content.includes('HeliWatchBridge.onUserLeaveHint()'),
+  );
+  check(
+    'onPictureInPictureModeChanged → HeliWatchBridge',
+    content.includes('override fun onPictureInPictureModeChanged(') &&
+      content.includes('HeliWatchBridge.onPictureInPictureModeChanged('),
   );
 }
 
@@ -231,6 +250,14 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
     'android/src/main/java/dev/heliwatch/SiteChromeClient.kt',
     'android/src/main/java/dev/heliwatch/NativeBridge.kt',
     'android/src/main/java/dev/heliwatch/PageHook.kt',
+    'android/src/main/java/dev/heliwatch/SessionState.kt',
+    'android/src/main/java/dev/heliwatch/TimerGuard.kt',
+    'android/src/main/java/dev/heliwatch/PiPController.kt',
+    'android/src/main/java/dev/heliwatch/SessionNotification.kt',
+    'android/src/main/java/dev/heliwatch/SessionService.kt',
+    'android/src/main/java/dev/heliwatch/MediaActionReceiver.kt',
+    'android/src/main/res/drawable/hw_ic_stat.xml',
+    'android/src/main/res/drawable/hw_ic_expand.xml',
     'permissions/default.toml',
   ];
   for (const relative of required) {
@@ -276,6 +303,78 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
   );
   check('NativeBridge: лимит 4 КБ', nativeBridge?.includes('4096') ?? false);
 
+  // Этап 4: foreground-сервис, уведомление, PiP и таймеры.
+  const serviceManifest = manifest ?? '';
+  for (const component of ['.SessionService', '.MediaActionReceiver']) {
+    check(`манифест плагина: ${component}`, serviceManifest.includes(component));
+  }
+  check(
+    'сервис: foregroundServiceType mediaPlayback|microphone',
+    serviceManifest.includes('mediaPlayback|microphone'),
+  );
+  check('сервис: stopWithTask=true', serviceManifest.includes('android:stopWithTask="true"'));
+  check(
+    'uses-feature picture_in_picture (required=false)',
+    serviceManifest.includes('android.software.picture_in_picture'),
+  );
+
+  for (const permission of [
+    'allow-pip-update',
+    'allow-pip-enter',
+    'allow-session-start',
+    'allow-session-update',
+    'allow-session-stop',
+    'allow-session-info',
+    'allow-keep-screen-on',
+  ]) {
+    check(`permissions: ${permission}`, permissions?.includes(permission) ?? false);
+  }
+
+  const pip = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/PiPController.kt'),
+  );
+  check('PiP: setAutoEnterEnabled (Android 12+)', pip?.includes('setAutoEnterEnabled') ?? false);
+  check('PiP: setSourceRectHint', pip?.includes('setSourceRectHint') ?? false);
+  check('PiP: RemoteAction', pip?.includes('RemoteAction(') ?? false);
+  check(
+    'PiP: выход из окна при закрытии комнаты',
+    pip?.includes('moveTaskToBack') ?? false,
+  );
+  check(
+    'PiP: вход только при активной комнате',
+    pip?.includes('SessionState.roomActive') ?? false,
+  );
+
+  const service = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/SessionService.kt'),
+  );
+  check('сервис: ServiceCompat.startForeground', service?.includes('ServiceCompat.startForeground') ?? false);
+  check(
+    'сервис: тип microphone после разрешения',
+    service?.includes('FOREGROUND_SERVICE_TYPE_MICROPHONE') ?? false,
+  );
+  check('сервис: partial WakeLock', service?.includes('PARTIAL_WAKE_LOCK') ?? false);
+  check('сервис: таймаут WakeLock', service?.includes('WAKE_TIMEOUT_MS') ?? false);
+
+  const timerGuard = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/TimerGuard.kt'),
+  );
+  check('TimerGuard: resumeTimers', timerGuard?.includes('resumeTimers()') ?? false);
+  check('TimerGuard: onResume WebView', timerGuard?.includes('view.onResume()') ?? false);
+  check('TimerGuard: только при активной комнате', timerGuard?.includes('SessionState.roomActive') ?? false);
+
+  const notification = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/SessionNotification.kt'),
+  );
+  check('уведомление: канал heliwatch_room', notification?.includes('heliwatch_room') ?? false);
+  check('уведомление: кнопки addAction', notification?.includes('addAction(') ?? false);
+
+  const receiver = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/MediaActionReceiver.kt'),
+  );
+  check('receiver: BroadcastReceiver', receiver?.includes(': BroadcastReceiver()') ?? false);
+  check('receiver: PendingIntent на себя', receiver?.includes('PendingIntent.getBroadcast') ?? false);
+
   const container = await readOptional(
     path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/HeliWatchContainer.kt'),
   );
@@ -284,6 +383,7 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
     container?.includes('override fun dispatchTouchEvent') ?? false,
   );
   check('контейнер: slop 6dp', container?.includes('6f * resources.displayMetrics.density') ?? false);
+  check('контейнер: PiP блокирует касания', container?.includes('if (pipMode)') ?? false);
   check(
     'контейнер: WebView добавляются в attach, а не в конструкторе',
     !/init\s*\{[\s\S]*?addView\(\s*(siteWebView|tauriWebView)/.test(container ?? ''),

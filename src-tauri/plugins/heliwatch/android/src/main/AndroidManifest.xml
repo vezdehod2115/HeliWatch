@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Разрешения HeliWatch объявлены в библиотечном манифесте плагина:
+  Разрешения и компоненты HeliWatch объявлены в библиотечном манифесте плагина:
   AGP смержит их в итоговый APK автоматически, и правка gen/android не нужна.
-  Часть разрешений понадобится на этапах 3–4 (голос, PiP, foreground-сервис),
-  но объявляем их сразу, чтобы манифест не менялся по частям.
+  Разрешения этапов 3–4 (голос, PiP, foreground-сервис) объявлены заранее;
+  сервис и receiver появились на этапе 4.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -20,5 +20,28 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+
+    <!-- PiP не обязателен: на устройствах без поддержки комната работает в фоне. -->
+    <uses-feature
+        android:name="android.software.picture_in_picture"
+        android:required="false" />
+
+    <application>
+        <!--
+          Foreground-сервис комнаты: mediaPlayback обязателен, microphone
+          добавляется вторым startForeground только при включённом микрофоне.
+          stopWithTask: убрали приложение из недавних — комната закрывается.
+        -->
+        <service
+            android:name=".SessionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|microphone"
+            android:stopWithTask="true" />
+
+        <!-- Кнопки PiP и уведомления: PendingIntent с явным компонентом. -->
+        <receiver
+            android:name=".MediaActionReceiver"
+            android:exported="false" />
+    </application>
 
 </manifest>

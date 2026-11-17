@@ -22,6 +22,9 @@ interface RoomBarProps {
   onCopy: () => void;
   onResync: () => void;
   onToggleZones: () => void;
+  /** Вход в PiP (этап 4): доступен, когда комната открыта. */
+  onPip: () => void;
+  pipAvailable: boolean;
 }
 
 const PHASE_LABELS: Record<RoomPhase, string> = {
@@ -60,6 +63,8 @@ export function RoomBar({
   onCopy,
   onResync,
   onToggleZones,
+  onPip,
+  pipAvailable,
 }: RoomBarProps) {
   const [debugOpen, setDebugOpen] = useState(false);
   const live = phase === 'joined';
@@ -101,6 +106,16 @@ export function RoomBar({
           disabled={!live}
         >
           <Icon name="sync" size={18} />
+        </button>
+        <button
+          type="button"
+          className="hw-iconbtn"
+          onClick={onPip}
+          aria-label="Смотреть в маленьком окне"
+          title="PiP"
+          disabled={!pipAvailable || !live}
+        >
+          <Icon name="pip" size={18} />
         </button>
         <button
           type="button"

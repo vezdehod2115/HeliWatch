@@ -17,8 +17,8 @@ pnpm android:doctor       # проверяет, что ничего не пот�
 | Файл | Правка |
 |---|---|
 | `app/build.gradle.kts` | `compileSdk = 36`, `targetSdk = 36`, `minSdk = 26` |
-| `app/src/main/AndroidManifest.xml` | маркер `HW:PATCH:ACTIVITY`, `configChanges` + `density`, `windowSoftInputMode=adjustResize`, `resizeableActivity=true`, deep link `heliwatch://` (`HW:PATCH:DEEPLINK`) |
-| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` и `onNewIntent → handleIntent` между маркерами `HW:PATCH:MAIN` / `HW:PATCH:INTENT` |
+| `app/src/main/AndroidManifest.xml` | маркер `HW:PATCH:ACTIVITY`, `configChanges` + `density`, `windowSoftInputMode=adjustResize`, `resizeableActivity=true`, `supportsPictureInPicture=true` (этап 4), deep link `heliwatch://` (`HW:PATCH:DEEPLINK`) |
+| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` и `onNewIntent → handleIntent` между маркерами `HW:PATCH:MAIN` / `HW:PATCH:INTENT`, прокси `onUserLeaveHint` и `onPictureInPictureModeChanged` между маркерами `HW:PATCH:PIP` |
 | `app/src/main/res/values/strings.xml` | `app_name` и `main_activity_title` = «HeliWatch» |
 | `app/src/main/res/values*/themes.xml` | `Theme.Material3.Dark.NoActionBar`, тёмный `windowBackground`, прозрачные системные бары |
 | `app/src/main/res/values/hw_branding.xml` | цвета окна и иконки |
@@ -79,6 +79,49 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
    feature `sqlite` и применяются при `Database.load('sqlite:heliwatch.db')`.
    В `capabilities/default.json` нужны `sql:default` и `sql:allow-execute`:
    набор `sql:default` разрешает только load/select/close.
+
+## PiP и фон (этап 4)
+
+Свои компоненты объявлены в **библиотечном манифесте плагина**
+(`plugins/heliwatch/android/src/main/AndroidManifest.xml`) — AGP смержит их сам:
+
+- `SessionService`: `foregroundServiceType="mediaPlayback|microphone"`,
+  `stopWithTask="true"`;
+- `MediaActionReceiver`: `exported="false"`, `PendingIntent` приходит с явным
+  компонентом;
+- `uses-feature android.software.picture_in_picture required="false"`.
+
+В `gen/android` руками правится только Activity (маркеры `HW:PATCH:ACTIVITY` и
+`HW:PATCH:PIP`): `supportsPictureInPicture="true"` и прокси
+`onUserLeaveHint`/`onPictureInPictureModeChanged` — Tauri не отдаёт эти колбэки
+плагину.
+
+Как это работает:
+
+1. React при входе в комнату шлёт `session_start` (code, mode, playing, micOn,
+   message, videoWidth/Height). Kotlin стартует `SessionService`, просит
+   POST_NOTIFICATIONS на Android 13+ и включает `setAutoEnterEnabled`.
+2. Каждое изменение (пауза, микрофон, последнее сообщение, пропорции) приходит
+   в `session_update` и `pip_update`. Обновлений немного: React сравнивает
+   подпись снимка и не шлёт одинаковые.
+3. Уход из приложения: Android 12+ входит в PiP сам, на 8–11 —
+   `onUserLeaveHint` → `enterPictureInPictureMode`. Вход разрешён только при
+   активной комнате.
+4. Кнопки PiP (`RemoteAction`) и уведомления → `MediaActionReceiver` →
+   `pip-action` в React → команда исполняется и состояние возвращается обратно.
+5. `TimerGuard` после `super.onPause()`/`super.onStop()` будит оба WebView
+   (`onResume` + `resumeTimers`) — `setInterval`, DataChannel и голос живут в
+   фоне. Проверка — счётчик времени в PiP-полосе.
+
+Диагностика:
+
+```powershell
+adb logcat -s HeliWatch:V ActivityManager:I | Select-String "SessionService|PiP|startForeground"
+# что система думает о сервисе
+adb shell dumpsys activity services dev.heliwatch.app.debug | Select-String "SessionService|foregroundServiceType"
+# текущий режим Activity
+adb shell dumpsys activity activities | Select-String "pinned|PiP|mPictureInPicture"
+```
 
 ## Окружение (Windows, проверено)
 
@@ -189,6 +232,10 @@ Copy-Item "src-tauri/target/aarch64-linux-android/debug/libheliwatch_lib.so" "$j
 | Тапы по панели уходят на сайт | Откройте «Отладка → зоны касания» (иконка жука): красные рамки — то, что реально пришло в Kotlin. Проверьте dpr и пересчёт после анимации. |
 | Клавиатура скрывает панель | В манифесте должен быть `windowSoftInputMode="adjustResize"`; React пересылает зоны на `visualViewport.resize`. |
 | Back закрывает приложение с первого раза | Не применён `HeliWatchBridge.install(this)`; `pnpm android:doctor` покажет. |
+| PiP не открывается по «домой» | Проверить `supportsPictureInPicture=true` (маркер `HW:PATCH:ACTIVITY`), маркеры `HW:PATCH:PIP` в MainActivity и что комната активна. На Android 11 и ниже вход делает `onUserLeaveHint` — без маркера PIP его нет. |
+| «SecurityException» при старте сервиса | На Android 14+ тип `microphone` нельзя объявлять без выданного RECORD_AUDIO и активного микрофона: сервис стартует с `mediaPlayback`, микрофон добавляется вторым `startForeground`. Смотрите logcat `HeliWatch`. |
+| Нет кнопок в уведомлении | Android 13+: не выдано POST_NOTIFICATIONS. Сервис при этом работает; разрешение запрашивается при входе в комнату. |
+| В PiP чёрный экран вместо видео | Сайт не отдал кадр (DRM/аппаратный декодер) — PiP показывает поверхность WebView, а не отдельный плеер. Проверьте тот же сайт в обычном режиме; ограничение описано в README. |
 | APK огромный | `public/test-video.mp4` попадает и в assets сайта, и в Tauri-бандл. Для релиза заменить на короткий ролик или стримить по URL. |
 | `vswhom-sys`: `D8050` при `cl.exe` | Собирать с `CARGO_PROFILE_DEV_DEBUG=0` (символы Rust не нужны для проверки) или включить Developer Mode/полноценный VS Build Tools. |
 | `Failed to create a symbolic link ... jniLibs` | Windows без Developer Mode: см. раздел выше — скопировать `.so` и запустить Gradle с `-x rustBuild...`. |
@@ -199,8 +246,9 @@ Copy-Item "src-tauri/target/aarch64-linux-android/debug/libheliwatch_lib.so" "$j
 
 1. `pnpm tauri android init`;
 2. в `app/build.gradle.kts` — 36/36/26;
-3. в манифесте — `configChanges` с `density`, `adjustResize`, `resizeableActivity`;
-4. в `MainActivity.onCreate` — `HeliWatchBridge.install(this)`;
+3. в манифесте — `configChanges` с `density`, `adjustResize`, `resizeableActivity`, `supportsPictureInPicture`;
+4. в `MainActivity.onCreate` — `HeliWatchBridge.install(this)`, плюс
+   `onUserLeaveHint`/`onPictureInPictureModeChanged` → `HeliWatchBridge`;
 5. скопировать `public/test-page.html` и `public/test-video.mp4` в
    `app/src/main/assets/`;
 6. `pnpm icons` и `pnpm android:patch` (или вручную повторить ресурсы из таблицы).

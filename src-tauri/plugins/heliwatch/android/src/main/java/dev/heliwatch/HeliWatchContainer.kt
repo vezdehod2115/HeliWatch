@@ -29,6 +29,9 @@ class HeliWatchContainer(
   private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
   private val slopPx = 6f * resources.displayMetrics.density
 
+  /** PiP: касания не маршрутизируются, окно разворачивает система. */
+  private var pipMode = false
+
   val isFullscreen: Boolean
     get() = fullscreenView != null
 
@@ -41,6 +44,11 @@ class HeliWatchContainer(
   }
 
   override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+    // В PiP приложению касания не нужны: система сама показывает меню и
+    // кнопку «развернуть», а случайный тап не должен уходить в сайт.
+    if (pipMode) {
+      return true
+    }
     // В fullscreen всё получает системный слой видео.
     if (fullscreenView != null) {
       return super.dispatchTouchEvent(ev)
@@ -87,6 +95,11 @@ class HeliWatchContainer(
 
       else -> return super.dispatchTouchEvent(ev)
     }
+  }
+
+  fun setPipMode(on: Boolean) {
+    pipMode = on
+    gestureTarget = null
   }
 
   fun showFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {

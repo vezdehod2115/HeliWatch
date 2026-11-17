@@ -180,6 +180,13 @@ async function patchManifest() {
         '<activity\n            android:resizeableActivity="true"',
       );
     }
+    // PiP (этап 4): окно видео поверх других приложений.
+    if (!activityTag.includes('android:supportsPictureInPicture=')) {
+      activityTag = activityTag.replace(
+        /<activity\b/,
+        '<activity\n            android:supportsPictureInPicture="true"',
+      );
+    }
 
     next = next.replace(
       activityMatch[0],
@@ -262,6 +269,37 @@ async function patchMainActivity() {
     }
     if (!next.includes('HeliWatchBridge.handleIntent(intent)')) {
       throw new Error('не удалось вставить onNewIntent() в MainActivity.kt');
+    }
+
+    // PiP (этап 4): Activity не отдаёт эти колбэки плагину Tauri, поэтому
+    // проксируем их в HeliWatchBridge вручную.
+    const pipBlock = `  // HW:PATCH:PIP:BEGIN
+  override fun onUserLeaveHint() {
+    super.onUserLeaveHint()
+    HeliWatchBridge.onUserLeaveHint()
+  }
+
+  override fun onPictureInPictureModeChanged(
+    isInPictureInPictureMode: Boolean,
+    newConfig: android.content.res.Configuration,
+  ) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    HeliWatchBridge.onPictureInPictureModeChanged(isInPictureInPictureMode)
+  }
+  // HW:PATCH:PIP:END`;
+    if (/^[ \t]*\/\/ HW:PATCH:PIP:BEGIN[\s\S]*?\/\/ HW:PATCH:PIP:END/m.test(next)) {
+      next = next.replace(
+        /^[ \t]*\/\/ HW:PATCH:PIP:BEGIN[\s\S]*?\/\/ HW:PATCH:PIP:END/m,
+        pipBlock,
+      );
+    } else {
+      next = next.replace(/\n}\s*$/, `\n\n${pipBlock}\n}\n`);
+    }
+    if (!next.includes('HeliWatchBridge.onUserLeaveHint()')) {
+      throw new Error('не удалось вставить onUserLeaveHint() в MainActivity.kt');
+    }
+    if (!next.includes('HeliWatchBridge.onPictureInPictureModeChanged(')) {
+      throw new Error('не удалось вставить onPictureInPictureModeChanged() в MainActivity.kt');
     }
     return next;
   });

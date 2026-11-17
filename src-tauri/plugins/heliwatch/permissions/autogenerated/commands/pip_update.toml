@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pip-update"
+description = "Enables the pip_update command without any pre-configured scope."
+commands.allow = ["pip_update"]
+
+[[permission]]
+identifier = "deny-pip-update"
+description = "Denies the pip_update command without any pre-configured scope."
+commands.deny = ["pip_update"]

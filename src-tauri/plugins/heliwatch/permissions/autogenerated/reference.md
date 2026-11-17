@@ -1,6 +1,6 @@
 ## Default Permission
 
-Базовые разрешения HeliWatch: управление сайтом, тач-роутинг и события
+Базовые разрешения HeliWatch: сайт, тач-роутинг, события, PiP и фон
 
 #### This default permission set includes the following:
 
@@ -10,6 +10,13 @@
 - `allow-site-cmd`
 - `allow-site-regions`
 - `allow-site-info`
+- `allow-pip-update`
+- `allow-pip-enter`
+- `allow-session-start`
+- `allow-session-update`
+- `allow-session-stop`
+- `allow-session-info`
+- `allow-keep-screen-on`
 - `allow-register-listener`
 - `allow-remove-listener`
 
@@ -21,6 +28,84 @@
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`heliwatch:allow-keep-screen-on`
+
+</td>
+<td>
+
+Enables the keep_screen_on command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-keep-screen-on`
+
+</td>
+<td>
+
+Denies the keep_screen_on command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-pip-enter`
+
+</td>
+<td>
+
+Enables the pip_enter command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-pip-enter`
+
+</td>
+<td>
+
+Denies the pip_enter command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-pip-update`
+
+</td>
+<td>
+
+Enables the pip_update command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-pip-update`
+
+</td>
+<td>
+
+Denies the pip_update command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -70,6 +155,110 @@ Enables the remove_listener command without any pre-configured scope.
 <td>
 
 Denies the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-session-info`
+
+</td>
+<td>
+
+Enables the session_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-session-info`
+
+</td>
+<td>
+
+Denies the session_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-session-start`
+
+</td>
+<td>
+
+Enables the session_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-session-start`
+
+</td>
+<td>
+
+Denies the session_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-session-stop`
+
+</td>
+<td>
+
+Enables the session_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-session-stop`
+
+</td>
+<td>
+
+Denies the session_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:allow-session-update`
+
+</td>
+<td>
+
+Enables the session_update command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`heliwatch:deny-session-update`
+
+</td>
+<td>
+
+Denies the session_update command without any pre-configured scope.
 
 </td>
 </tr>

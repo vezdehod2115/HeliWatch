@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BottomBar } from '../site/BottomBar';
 import { TopBar } from '../site/TopBar';
 import { RoomBar } from './RoomBar';
@@ -35,6 +35,20 @@ import { DuckingController } from '../../media/ducking';
 import { VoiceEngine, describeVoiceError, isVoiceSupported } from '../../media/voice';
 import { type PlaybackView } from '../../app/playback';
 import { Icon } from '../../app/icons';
+import { PipLayer } from '../pip/PipLayer';
+import {
+  pipMessageLine,
+  sessionPayload,
+  sessionSignature,
+  type SessionPayloadInput,
+} from '../pip/pipState';
+import { enterPip, readSessionInfo, updatePipState } from '../../native/pip';
+import {
+  setKeepScreenOn,
+  startSession,
+  stopSession,
+  updateSession,
+} from '../../native/service';
 
 interface RoomScreenProps {
   code: string;
@@ -113,6 +127,8 @@ export function RoomScreen({
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceLevel, setVoiceLevel] = useState(0);
   const [speaking, setSpeaking] = useState<Record<string, string>>({});
+  const [pipActive, setPipActive] = useState(false);
+  const [pipSupported, setPipSupported] = useState(true);
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
@@ -136,6 +152,20 @@ export function RoomScreen({
   const preparedRef = useRef(new Map<string, PreparedImage>());
   const viewerRef = useRef<string | null>(null);
   const typingTimer = useRef<number | null>(null);
+  const sessionStarted = useRef(false);
+  const sessionStartedAt = useRef(Date.now());
+  const sessionSignatureRef = useRef('');
+  const notificationWarned = useRef(false);
+  const notificationCheck = useRef<number | null>(null);
+  const pipHandlers = useRef<{
+    toggle: () => void;
+    mic: () => void;
+    leave: () => void;
+  }>({
+    toggle: () => undefined,
+    mic: () => undefined,
+    leave: () => undefined,
+  });
 
   notifyRef.current = notify;
   onLeaveRef.current = onLeave;
@@ -150,6 +180,92 @@ export function RoomScreen({
       .members.find((item) => item.peerId === peerId);
     return member?.name ?? 'Друг';
   };
+
+  // ---------- Фон и PiP: снимок комнаты для нативного слоя (этап 4) ----------
+
+  const buildSessionInput = useCallback((): SessionPayloadInput => {
+    const state = useRoomStore.getState();
+    const mode = state.mode;
+    const siteVideo = siteRef.current.status.video;
+    const local = localRef.current;
+    const file = localFileRef.current;
+    const messages = useChatStore.getState().messages;
+    const last = messages.length > 0 ? messages[messages.length - 1] : null;
+    const dimensions =
+      mode === 'site'
+        ? { width: siteVideo.width, height: siteVideo.height }
+        : (local?.dimensions() ?? { width: 0, height: 0 });
+    return {
+      code,
+      title: mode === 'site' ? siteRef.current.status.title : (file?.name ?? ''),
+      mode,
+      roomActive: state.phase === 'joined',
+      playing: mode === 'site' ? siteVideo.playing : (local?.sample().playing ?? false),
+      micOn: voiceActive && !voiceMuted,
+      message: pipMessageLine(last),
+      videoWidth: dimensions.width,
+      videoHeight: dimensions.height,
+    };
+  }, [code, voiceActive, voiceMuted]);
+
+  useEffect(() => {
+    void readSessionInfo().then((info) => {
+      if (info) {
+        setPipSupported(info.pipSupported);
+      }
+    });
+  }, []);
+
+  // Один и тот же снимок уходит и в PiP, и в сервис уведомления.
+  useEffect(() => {
+    if (snapshot.phase !== 'joined') {
+      return;
+    }
+    const input = buildSessionInput();
+    const payload = sessionPayload(input);
+    const signature = sessionSignature(payload);
+    if (signature === sessionSignatureRef.current) {
+      return;
+    }
+    sessionSignatureRef.current = signature;
+
+    if (!sessionStarted.current) {
+      sessionStarted.current = true;
+      sessionStartedAt.current = Date.now();
+      void startSession(input).then((result) => {
+        if (!result.ok && result.error) {
+          notifyRef.current(result.error);
+        }
+        if (result.notifications === false && !notificationWarned.current) {
+          // Разрешение спрашивается асинхронно: перепроверяем через пару секунд,
+          // иначе предупреждение появится даже при только что выданном доступе.
+          notificationCheck.current = window.setTimeout(() => {
+            notificationCheck.current = null;
+            void readSessionInfo().then((info) => {
+              if (!info || info.notifications || notificationWarned.current) {
+                return;
+              }
+              notificationWarned.current = true;
+              notifyRef.current('Уведомление скрыто: разрешите уведомления для HeliWatch');
+            });
+          }, 2500);
+        }
+      });
+    } else {
+      void updateSession(input);
+    }
+    void updatePipState(input);
+  }, [
+    buildSessionInput,
+    snapshot.phase,
+    snapshot.mode,
+    site.status.video,
+    localView,
+    localFile,
+    chat.messages,
+    voiceActive,
+    voiceMuted,
+  ]);
 
   const applyRemote = useCallback((action: PlaybackAction) => {
     applyingRemoteUntil.current = Date.now() + 800;
@@ -787,12 +903,18 @@ export function RoomScreen({
         window.clearTimeout(typingTimer.current);
         typingTimer.current = null;
       }
+      if (notificationCheck.current !== null) {
+        window.clearTimeout(notificationCheck.current);
+        notificationCheck.current = null;
+      }
       engine.stop();
       voiceEngineRef.current = null;
       duckingRef.current?.dispose();
       duckingRef.current = null;
       // Голос закончился — возвращаем сайту полную громкость.
       siteRef.current.setVolume(1);
+      // Комната закрыта: сервис, WakeLock и автовход в PiP выключаются.
+      void stopSession();
       useChatStore.getState().reset();
       setRemoteStreams({});
     };
@@ -804,6 +926,31 @@ export function RoomScreen({
   useEffect(
     () =>
       site.onEvent((event) => {
+        if (event.t === 'pip-mode') {
+          const on = event.on === true;
+          setPipActive(on);
+          if (on) {
+            // В PiP панели не нужны: остаётся видео и строка сообщения.
+            const chatState = useChatStore.getState();
+            chatState.setOpen(false);
+            chatState.setEmojiOpen(false);
+            setReactionsOpen(false);
+            setViewerImageId(null);
+          }
+          return;
+        }
+        if (event.t === 'pip-action') {
+          const action = typeof event.action === 'string' ? event.action : '';
+          const handlers = pipHandlers.current;
+          if (action === 'toggle') {
+            handlers.toggle();
+          } else if (action === 'mic') {
+            handlers.mic();
+          } else if (action === 'leave') {
+            handlers.leave();
+          }
+          return;
+        }
         if (event.t === 'back-overlay') {
           // Системный back при открытой панели: закрываем верхнюю.
           if (viewerRef.current) {
@@ -1022,6 +1169,11 @@ export function RoomScreen({
         ? localFile.name
         : 'Файл не выбран';
 
+  // Экран не гаснет, пока комната открыта и идёт воспроизведение (этап 4).
+  useEffect(() => {
+    void setKeepScreenOn(snapshot.phase === 'joined' && view.playing);
+  }, [snapshot.phase, view.playing]);
+
   const applyAndReport = (action: PlaybackAction) => {
     if (!found) {
       return;
@@ -1044,6 +1196,9 @@ export function RoomScreen({
   const togglePlay = () => {
     applyAndReport({ kind: view.playing ? 'pause' : 'play' });
   };
+
+  // Кнопки PiP и уведомления вызывают те же обработчики, что и панель.
+  pipHandlers.current = { toggle: togglePlay, mic: toggleMic, leave };
 
   const seekBy = (seconds: number) => {
     if (!found) {
@@ -1076,6 +1231,21 @@ export function RoomScreen({
     clientRef.current?.requestResync();
     notifyRef.current('Запросили состояние у ведущего');
   };
+
+  /** Кнопка PiP в шапке: то же, что жест «домой» на Android 12+. */
+  const enterPipMode = useCallback(() => {
+    void enterPip().then((result) => {
+      if (!result.ok) {
+        notifyRef.current(result.error ?? 'PiP недоступен на этом устройстве');
+        return;
+      }
+      const chatState = useChatStore.getState();
+      chatState.setOpen(false);
+      chatState.setEmojiOpen(false);
+      setViewerImageId(null);
+      setReactionsOpen(false);
+    });
+  }, []);
 
   const openSite = (input: string) => {
     if (role !== 'host') {
@@ -1115,29 +1285,35 @@ export function RoomScreen({
   const viewerUrl = viewerImageId ? chat.images[viewerImageId] : undefined;
 
   return (
-    <div className={`hw-app hw-app--room hw-app--${snapshot.mode}`}>
-      <RoomBar
-        code={code}
-        role={role}
-        mode={snapshot.mode}
-        phase={snapshot.phase}
-        strategy={snapshot.strategy}
-        peerCount={snapshot.peerCount}
-        members={snapshot.members}
-        selfUserId={identity.userId}
-        driverId={snapshot.driverId}
-        seq={snapshot.playback?.seq ?? 0}
-        drift={snapshot.drift}
-        hint={snapshot.hint}
-        error={snapshot.error}
-        zonesOpen={zonesOpen}
-        onLeave={leave}
-        onCopy={() => void copyLink()}
-        onResync={requestResync}
-        onToggleZones={onToggleZones}
-      />
+    <div
+      className={`hw-app hw-app--room hw-app--${snapshot.mode}${pipActive ? ' hw-app--pip' : ''}`}
+    >
+      {!pipActive && (
+        <RoomBar
+          code={code}
+          role={role}
+          mode={snapshot.mode}
+          phase={snapshot.phase}
+          strategy={snapshot.strategy}
+          peerCount={snapshot.peerCount}
+          members={snapshot.members}
+          selfUserId={identity.userId}
+          driverId={snapshot.driverId}
+          seq={snapshot.playback?.seq ?? 0}
+          drift={snapshot.drift}
+          hint={snapshot.hint}
+          error={snapshot.error}
+          zonesOpen={zonesOpen}
+          onLeave={leave}
+          onCopy={() => void copyLink()}
+          onResync={requestResync}
+          onToggleZones={onToggleZones}
+          onPip={enterPipMode}
+          pipAvailable={pipSupported}
+        />
+      )}
 
-      {snapshot.mode === 'site' && (
+      {!pipActive && snapshot.mode === 'site' && (
         <TopBar
           status={site.status}
           zonesOpen={zonesOpen}
@@ -1161,10 +1337,10 @@ export function RoomScreen({
         />
       )}
 
-      <div className="hw-mid">
+      <div className={`hw-mid${pipActive ? ' hw-mid--pip' : ''}`}>
         {snapshot.mode === 'site' ? (
           <main className="hw-stage" aria-hidden="true">
-            {waiting && (
+            {!pipActive && waiting && (
               <div className="hw-roomwait" data-hw-region="roomwait">
                 <span className="hw-spinner" aria-hidden="true" />
                 <strong>{snapshot.phase === 'reconnecting' ? 'Переподключаемся…' : 'Подключаемся к комнате'}</strong>
@@ -1185,7 +1361,7 @@ export function RoomScreen({
           />
         )}
 
-        {chat.open && (
+        {!pipActive && chat.open && (
           <ChatPanel
             messages={chat.messages}
             images={chat.images}
@@ -1211,52 +1387,66 @@ export function RoomScreen({
         )}
       </div>
 
-      <FloatingReactions
-        reactions={chat.reactions}
-        onDone={(key) => useChatStore.getState().dropReaction(key)}
-      />
+      {!pipActive && (
+        <FloatingReactions
+          reactions={chat.reactions}
+          onDone={(key) => useChatStore.getState().dropReaction(key)}
+        />
+      )}
 
-      <ChatDock
-        lastMessage={lastMessage}
-        unread={chat.unread}
-        open={chat.open}
-        reactionsOpen={reactionsOpen}
-        voice={{
-          supported: isVoiceSupported(),
-          active: voiceActive,
-          muted: voiceMuted,
-          level: voiceLevel,
-          speaking: speakingNames,
-          busy: voiceBusy,
-        }}
-        onOpen={() => {
-          const store = useChatStore.getState();
-          store.setOpen(!store.open);
-          if (store.open) {
-            setReactionsOpen(false);
-          }
-        }}
-        onToggleReactions={() => setReactionsOpen((value) => !value)}
-        onReaction={sendReaction}
-        onToggleMic={toggleMic}
-      />
+      {!pipActive && (
+        <ChatDock
+          lastMessage={lastMessage}
+          unread={chat.unread}
+          open={chat.open}
+          reactionsOpen={reactionsOpen}
+          voice={{
+            supported: isVoiceSupported(),
+            active: voiceActive,
+            muted: voiceMuted,
+            level: voiceLevel,
+            speaking: speakingNames,
+            busy: voiceBusy,
+          }}
+          onOpen={() => {
+            const store = useChatStore.getState();
+            store.setOpen(!store.open);
+            if (store.open) {
+              setReactionsOpen(false);
+            }
+          }}
+          onToggleReactions={() => setReactionsOpen((value) => !value)}
+          onReaction={sendReaction}
+          onToggleMic={toggleMic}
+        />
+      )}
 
-      <BottomBar
-        view={view}
-        label={label}
-        mode={snapshot.mode}
-        collapsed={collapsed}
-        onToggleCollapsed={() => setCollapsed((value) => !value)}
-        onTogglePlay={togglePlay}
-        onSeek={seekBy}
-        onRate={setRate}
-        onReload={site.reload}
-        onSyncToMe={syncToMe}
-        canSync={snapshot.phase === 'joined' && found}
-        driverLabel={driverName}
-      />
+      {!pipActive && (
+        <BottomBar
+          view={view}
+          label={label}
+          mode={snapshot.mode}
+          collapsed={collapsed}
+          onToggleCollapsed={() => setCollapsed((value) => !value)}
+          onTogglePlay={togglePlay}
+          onSeek={seekBy}
+          onRate={setRate}
+          onReload={site.reload}
+          onSyncToMe={syncToMe}
+          canSync={snapshot.phase === 'joined' && found}
+          driverLabel={driverName}
+        />
+      )}
 
-      {viewerImageId && viewerUrl && (
+      {pipActive && (
+        <PipLayer
+          message={pipMessageLine(lastMessage)}
+          micOn={voiceActive && !voiceMuted}
+          startedAt={sessionStartedAt.current}
+        />
+      )}
+
+      {!pipActive && viewerImageId && viewerUrl && (
         <ImageViewer url={viewerUrl} onClose={() => setViewerImageId(null)} />
       )}
 

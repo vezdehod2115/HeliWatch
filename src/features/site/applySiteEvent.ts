@@ -52,6 +52,8 @@ function applyPageEvent(
         duration,
         rate: num(data.rate, state.video.rate),
         muted: bool(data.muted, state.video.muted),
+        width: num(data.width, state.video.width),
+        height: num(data.height, state.video.height),
       };
       return { ...state, video };
     }
@@ -79,6 +81,8 @@ function applyPageEvent(
             duration,
             rate: num(data.rate, state.video.rate),
             muted: bool(data.muted, state.video.muted),
+            width: num(data.width, state.video.width),
+            height: num(data.height, state.video.height),
           },
         };
       }

@@ -1,5 +1,5 @@
 [default]
-description = "Базовые разрешения HeliWatch: управление сайтом, тач-роутинг и события"
+description = "Базовые разрешения HeliWatch: сайт, тач-роутинг, события, PiP и фон"
 permissions = [
     "allow-site-init",
     "allow-site-load",
@@ -7,6 +7,13 @@ permissions = [
     "allow-site-cmd",
     "allow-site-regions",
     "allow-site-info",
+    "allow-pip-update",
+    "allow-pip-enter",
+    "allow-session-start",
+    "allow-session-update",
+    "allow-session-stop",
+    "allow-session-info",
+    "allow-keep-screen-on",
     "allow-register-listener",
     "allow-remove-listener",
 ]
