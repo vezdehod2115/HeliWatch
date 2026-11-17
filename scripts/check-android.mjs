@@ -215,8 +215,7 @@ async function checkAssets() {
   }
 }
 
-async function checkPlugin() {
-  const pluginRoot = path.join(root, 'src-tauri', 'plugins', 'heliwatch');
+async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 'plugins', 'heliwatch');
   const required = [
     'Cargo.toml',
     'build.rs',
@@ -287,6 +286,15 @@ async function checkPlugin() {
   check('контейнер: slop 6dp', container?.includes('6f * resources.displayMetrics.density') ?? false);
 }
 
+async function checkNativeAlignment() {
+  const config = await readOptional(path.join(root, '.cargo', 'config.toml'));
+  check(
+    '16-КБ выравнивание Android .so (.cargo/config.toml)',
+    config?.includes('max-page-size=16384') ?? false,
+    'без него Android 15/16 с 16-КБ страницами падает на dlopen',
+  );
+}
+
 async function main() {
   if (!(await exists(genAndroid))) {
     process.stderr.write(
@@ -303,6 +311,7 @@ async function main() {
   await checkResources();
   await checkAssets();
   await checkPlugin();
+  await checkNativeAlignment();
 
   for (const warning of warnings) {
     process.stdout.write(`[android:doctor] ВНИМАНИЕ: ${warning}\n`);

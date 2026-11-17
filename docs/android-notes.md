@@ -94,14 +94,40 @@ pnpm android:apk
 
 APK: `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`.
 
-## Windows без Developer Mode
+## Android 15/16 и 16-КБ страницы памяти
 
+На устройствах с 16-КБ страницами (Android 15+ на части Pixel и других)
+`dlopen` отклоняет нативную библиотеку, если её LOAD-сегменты выровнены на
+4 КБ. Симптом: несколько секунд зелёного фона окна, затем процесс падает с
+`SIGABRT`; в `adb logcat -b crash` нет Java-стека приложения.
+
+В репозитории лежит `.cargo/config.toml`:
+
+```toml
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+```
+
+После сборки проверяйте:
+
+```powershell
+llvm-readelf -l <libheliwatch_lib.so>   # LOAD ... Align 0x4000
+zipalign -c -P 16 -v 4 <apk> | Select-String 'lib/arm64-v8a'
+# ...libheliwatch_lib.so (OK)
+```
+
+Если `.so` остался с `Align 0x1000`, значит Rust не увидел `.cargo/config.toml`
+(запускайте сборку из корня репозитория) или `RUSTFLAGS` перетёрли флаги.
+
+## Windows без Developer Mode
 На машине без режима разработчика (и без права создавать символьные ссылки)
 `pnpm tauri android build --apk --debug` доходит до упаковки `.so` и падает:
 `Failed to create a symbolic link ... jniLibs`. Плюс `cc`/`cl.exe` может не
 собрать C-часть `libsqlite3-sys` (SQLite-плагин) или `vswhom-sys` с
 debug-информацией (`D8050`). Поэтому сборка идёт с `CARGO_PROFILE_DEV_DEBUG=0`.
-Обход, которым собран APK 0.2.0:
+Обход, которым собран APK 0.2.x:
 
 ```powershell
 # 1. Сборка dist + Rust для arm64. Ошибка symlink в конце ожидаема:
