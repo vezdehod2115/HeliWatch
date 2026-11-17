@@ -49,3 +49,25 @@ export async function listRecentRooms(limit = 5): Promise<RecentRoom[]> {
 export async function removeRecentRoom(code: string): Promise<boolean> {
   return executeSql('DELETE FROM recent_rooms WHERE code = $1', [code]);
 }
+
+/** Одна недавняя комната по коду — например, чтобы показать её в лобби. */
+export async function findRecentRoom(code: string): Promise<RecentRoom | null> {
+  const rows = await selectRows<RecentRoomRow>(
+    'SELECT code, mode, last_join_at FROM recent_rooms WHERE code = $1 LIMIT 1',
+    [code],
+  );
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+  return {
+    code: row.code,
+    mode:
+      row.mode === 'local'
+        ? ('local' as const)
+        : row.mode === 'stream'
+          ? ('stream' as const)
+          : ('site' as const),
+    lastJoinAt: Number(row.last_join_at),
+  };
+}

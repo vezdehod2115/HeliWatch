@@ -25,7 +25,7 @@ import { imageUrlFromBytes, prepareImage, type PreparedImage } from '../chat/ima
 import type { SiteController } from '../site/useSiteController';
 import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl } from '../../native/siteBridge';
 import type { LocalProfile } from '../../db/repo/identity';
-import { roomLink } from '../../net/protocol';
+import { LOBBY_ROOM_ID, roomLink } from '../../net/protocol';
 import {
   actionFromVideoEvent,
   projectState,
@@ -34,6 +34,7 @@ import {
   type PlaybackAction,
   type PlaybackSample,
   type PlaybackState,
+  type RoomMetaPayload,
   type RoomMode,
   type RoomRole,
   type StreamStartData,
@@ -41,10 +42,15 @@ import {
 import type { Identity } from '../../net/identity';
 import { RoomClient, type RoomEvent } from '../../net/room';
 import { connectTrystero } from '../../net/trystero';
+import { LobbyPublisher } from '../../net/lobby';
+import { ModerationPanel } from './ModerationPanel';
+import { JoinRequests } from './JoinRequests';
+import type { RoomSetup } from '../lobby/types';
 import { useRoomStore } from '../../stores/room';
 import { useChatStore } from '../../stores/chat';
 import { SETTINGS_KEYS, readSetting, writeSetting } from '../../db/repo/settings';
 import { listRoomMessages, saveRoomMessage } from '../../db/repo/chat';
+import { listBlocks, pruneBlocks, blockUser, BAN_SESSION_MS } from '../../db/repo/blocklist';
 import { sanitizeRecent } from '../chat/emoji';
 import { DuckingController } from '../../media/ducking';
 import { VoiceEngine, describeVoiceError, isVoiceSupported } from '../../media/voice';
@@ -69,6 +75,9 @@ interface RoomScreenProps {
   code: string;
   role: RoomRole;
   initialMode: RoomMode | null;
+  /** Настройки созданной комнаты (у гостя null — они придут в welcome). */
+  setup: RoomSetup | null;
+  password: string | null;
   identity: Identity;
   profile: LocalProfile;
   site: SiteController;
@@ -120,6 +129,8 @@ export function RoomScreen({
   code,
   role,
   initialMode,
+  setup,
+  password,
   identity,
   profile,
   site,
@@ -144,6 +155,7 @@ export function RoomScreen({
   const [speaking, setSpeaking] = useState<Record<string, string>>({});
   const [pipActive, setPipActive] = useState(false);
   const [pipSupported, setPipSupported] = useState(true);
+  const [moderationOpen, setModerationOpen] = useState(false);
   // Стрим файла хоста (этап 5): у хоста — исходящий поток, у зрителя — входящий.
   const [hostStreaming, setHostStreaming] = useState(false);
   const [streamInfo, setStreamInfo] = useState<StreamStartData | null>(null);
@@ -156,6 +168,9 @@ export function RoomScreen({
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
+  const lobbyRef = useRef<LobbyPublisher | null>(null);
+  /** Локальный бан-лист: хост не пускает забаненных, гость не идёт к ним. */
+  const blockedRef = useRef<Set<string>>(new Set());
   const localRef = useRef<LocalPlayerHandle>(null);
   const remoteRef = useRef<RemoteStreamPlayerHandle>(null);
   const streamEngineRef = useRef<StreamEngine | null>(null);
@@ -375,11 +390,13 @@ export function RoomScreen({
     leaving.current = true;
     const client = clientRef.current;
     clientRef.current = null;
+    lobbyRef.current?.stop();
+    lobbyRef.current = null;
     if (client) {
-      void client.stop(role === 'host' ? 'host-left' : 'left');
+      void client.stop(client.selfIsHost ? 'host-left' : 'left');
     }
     onLeaveRef.current();
-  }, [role]);
+  }, []);
 
   // ---------- Чат: отправка ----------
 
@@ -620,6 +637,11 @@ export function RoomScreen({
       phase: role === 'host' ? 'joined' : 'connecting',
       selfUserId: identity.userId,
       driverId: identity.userId,
+      hostUserId: role === 'host' ? identity.userId : null,
+      title: setup?.title?.trim() || `Комната ${code}`,
+      limit: setup?.limit ?? (initialMode === 'stream' ? 3 : 4),
+      closed: setup?.closed ?? false,
+      knock: setup?.knock ?? false,
       members: [
         {
           userId: identity.userId,
@@ -632,6 +654,14 @@ export function RoomScreen({
         },
       ],
     });
+
+    // Бан-лист этапа 6: хост не пускает забаненных, гость помнит обидчика.
+    void pruneBlocks()
+      .then(() => listBlocks())
+      .then((entries) => {
+        blockedRef.current = new Set(entries.map((entry) => entry.userId));
+      })
+      .catch(() => undefined);
 
     const chatStore = useChatStore.getState();
     chatStore.init(code);
@@ -728,6 +758,83 @@ export function RoomScreen({
         case 'members':
           store.patch({ members: event.members });
           break;
+        case 'meta':
+          store.patch({
+            title: event.meta.title,
+            limit: event.meta.limit,
+            closed: event.meta.closed,
+            knock: event.meta.knock,
+            mode: event.meta.mode,
+          });
+          break;
+        case 'host-changed': {
+          store.patch({ hostUserId: event.hostUserId, epoch: event.epoch });
+          if (event.self) {
+            notifyRef.current('Вы теперь хост комнаты');
+          } else {
+            const host = store.members.find(
+              (member) => member.userId === event.hostUserId,
+            );
+            notifyRef.current(`Хост комнаты теперь ${host?.name ?? 'друг'}`);
+          }
+          break;
+        }
+        case 'join-request': {
+          const requests = useRoomStore
+            .getState()
+            .joinRequests.filter((item) => item.userId !== event.request.userId);
+          store.patch({ joinRequests: [...requests, event.request] });
+          notifyRef.current(`${event.request.name} просится в комнату`);
+          break;
+        }
+        case 'join-decision':
+          store.patch({
+            joinRequests: useRoomStore
+              .getState()
+              .joinRequests.filter((item) => item.userId !== event.userId),
+          });
+          notifyRef.current(
+            event.accepted
+              ? `${event.name} в комнате`
+              : `Вход ${event.name} отклонён`,
+          );
+          break;
+        case 'moderation':
+          notifyRef.current(
+            event.action === 'ban'
+              ? `${event.name} забанен`
+              : `${event.name} исключён из комнаты`,
+          );
+          if (event.action === 'ban') {
+            blockedRef.current.add(event.userId);
+            void blockUser(
+              event.userId,
+              'забанен хостом комнаты',
+              event.until !== undefined ? 'session' : 'forever',
+            ).catch(() => undefined);
+          }
+          break;
+        case 'kicked':
+          store.patch({
+            error:
+              event.reason === 'banned'
+                ? 'Хост забанил вас в этой комнате'
+                : 'Хост исключил вас из комнаты',
+          });
+          if (event.reason === 'banned') {
+            // Локально запоминаем, кто забанил: обратно не стучимся.
+            blockedRef.current.add(event.by);
+            void blockUser(event.by, 'забанил вас', 'session').catch(() => undefined);
+          }
+          break;
+        case 'mute-request': {
+          const client = clientRef.current;
+          voiceEngineRef.current?.setMuted(true);
+          client?.setMicMuted(true);
+          setVoiceMuted(true);
+          notifyRef.current(`${event.name} попросил выключить микрофон`);
+          break;
+        }
         case 'joined': {
           modeRef.current = event.meta.mode;
           store.patch({
@@ -735,6 +842,10 @@ export function RoomScreen({
             mode: event.meta.mode,
             members: event.members,
             hostUserId: event.hostUserId,
+            title: event.meta.title,
+            limit: event.meta.limit,
+            closed: event.meta.closed,
+            knock: event.meta.knock,
             playback: event.state,
             stateReceivedAt: Date.now(),
             driverId: event.state.by,
@@ -974,8 +1085,16 @@ export function RoomScreen({
         color: profile.nameColor,
         avatarHash: profile.avatarHash ?? undefined,
       },
-      connect: (strategy) => connectTrystero(strategy, code),
+      connect: (strategy, roomId) => connectTrystero(strategy, roomId),
       onEvent: handleEvent,
+      meta: {
+        title: setup?.title,
+        limit: setup?.limit,
+        closed: setup?.closed,
+        knock: setup?.knock,
+      },
+      password,
+      isBanned: (userId) => blockedRef.current.has(userId),
       initialUrl:
         role === 'host' && (initialMode ?? 'site') === 'site'
           ? siteRef.current.status.url || TEST_PAGE_URL
@@ -987,8 +1106,11 @@ export function RoomScreen({
 
     return () => {
       clientRef.current = null;
+      lobbyRef.current?.stop();
+      lobbyRef.current = null;
       if (client.phase !== 'closed' && client.phase !== 'error') {
-        void client.stop(role === 'host' ? 'host-left' : 'left');
+        // Новый хост (после миграции) уходит так же, как обычный хост.
+        void client.stop(client.selfIsHost ? 'host-left' : 'left');
       }
       if (correctionTimer.current !== null) {
         window.clearTimeout(correctionTimer.current);
@@ -1035,6 +1157,7 @@ export function RoomScreen({
             chatState.setEmojiOpen(false);
             setReactionsOpen(false);
             setViewerImageId(null);
+            setModerationOpen(false);
           }
           return;
         }
@@ -1052,6 +1175,10 @@ export function RoomScreen({
         }
         if (event.t === 'back-overlay') {
           // Системный back при открытой панели: закрываем верхнюю.
+          if (moderationOpen) {
+            setModerationOpen(false);
+            return;
+          }
           if (viewerRef.current) {
             setViewerImageId(null);
             return;
@@ -1097,18 +1224,18 @@ export function RoomScreen({
           reportAction(action, sample);
         }
       }),
-    [site.onEvent, reportAction],
+    [site.onEvent, reportAction, moderationOpen],
   );
 
   // Системный back перехватывается, только пока открыта панель React.
   useEffect(() => {
-    const captured = chat.open || chat.emojiOpen || viewerImageId !== null;
+    const captured = chat.open || chat.emojiOpen || viewerImageId !== null || moderationOpen;
     siteRef.current.setBackCapture(captured);
     return () => {
       // Уходим из комнаты с открытой панелью — back снова принадлежит истории.
       siteRef.current.setBackCapture(false);
     };
-  }, [chat.open, chat.emojiOpen, viewerImageId]);
+  }, [chat.open, chat.emojiOpen, viewerImageId, moderationOpen]);
 
   // «Печатает…» протухает само: чистим раз в секунду, пока чат открыт.
   useEffect(() => {
@@ -1120,7 +1247,7 @@ export function RoomScreen({
 
   // Хост публикует адрес сайта: обычная навигация внутри WebView тоже.
   useEffect(() => {
-    if (role !== 'host' || snapshot.mode !== 'site' || snapshot.phase !== 'joined') {
+    if (!selfHost || snapshot.mode !== 'site' || snapshot.phase !== 'joined') {
       return;
     }
     const url = site.status.url;
@@ -1132,7 +1259,7 @@ export function RoomScreen({
     }
     lastPublishedUrl.current = url;
     clientRef.current?.publishSiteUrl(url);
-  }, [site.status.url, snapshot.mode, snapshot.phase, role]);
+  }, [site.status.url, snapshot.mode, snapshot.phase, snapshot.hostUserId, role, identity.userId]);
 
   // Системный back на корне истории сайта выходит из комнаты.
   useEffect(() => {
@@ -1360,7 +1487,116 @@ export function RoomScreen({
   );
 
   const siteVideo = site.status.video;
-  const streamViewer = snapshot.mode === 'stream' && role === 'guest';
+  /** Хост «по факту»: после передачи/миграции роль в снимке меняется. */
+  const selfHost =
+    snapshot.hostUserId !== null
+      ? snapshot.hostUserId === identity.userId
+      : role === 'host';
+  const roomFull = snapshot.members.length >= snapshot.limit;
+  const streamViewer = snapshot.mode === 'stream' && !selfHost;
+
+  const moderateKick = (userId: string) => {
+    if (clientRef.current?.kick(userId)) {
+      notifyRef.current('Участник исключён');
+    }
+  };
+
+  const moderateBan = (userId: string, scope: 'session' | 'forever') => {
+    const until = scope === 'session' ? Date.now() + BAN_SESSION_MS : undefined;
+    if (clientRef.current?.ban(userId, 'host-ban', until)) {
+      blockedRef.current.add(userId);
+      notifyRef.current(
+        scope === 'forever' ? 'Участник забанен навсегда' : 'Участник забанен на сессию',
+      );
+    }
+  };
+
+  const moderateMute = (userId: string) => {
+    clientRef.current?.requestMute(userId);
+    notifyRef.current('Запрос на мут отправлен');
+  };
+
+  const moderateTransfer = (userId: string) => {
+    clientRef.current?.transferHost(userId);
+    setModerationOpen(false);
+    notifyRef.current('Хост передан участнику');
+  };
+
+  const updateMeta = (patch: RoomMetaPayload) => {
+    if (!clientRef.current?.updateRoomMeta(patch)) {
+      notifyRef.current('Не удалось изменить настройки комнаты');
+    }
+  };
+
+  const closeRoom = () => {
+    clientRef.current?.closeRoom();
+    setModerationOpen(false);
+  };
+
+  const acceptJoin = (userId: string) => {
+    clientRef.current?.acceptJoin(userId);
+  };
+
+  const denyJoin = (userId: string) => {
+    clientRef.current?.denyJoin(userId);
+  };
+
+  // Карточка в лобби живёт фоном, пока комната открыта и есть места (§4.8).
+  useEffect(() => {
+    if (!selfHost || snapshot.phase !== 'joined' || snapshot.closed || roomFull) {
+      const publisher = lobbyRef.current;
+      lobbyRef.current = null;
+      if (publisher) {
+        if (snapshot.closed || roomFull) {
+          publisher.remove();
+        } else {
+          publisher.stop();
+        }
+      }
+      return;
+    }
+    if (!lobbyRef.current) {
+      const publisher = new LobbyPublisher({
+        identity,
+        connect: (strategy) => connectTrystero(strategy, LOBBY_ROOM_ID),
+        onEvent: (event) => {
+          if (event.type === 'error') {
+            notifyRef.current(event.message);
+          }
+        },
+        card: () => {
+          const state = useRoomStore.getState();
+          return {
+            code,
+            title: state.title || `Комната ${code}`,
+            mode: state.mode,
+            closed: state.closed,
+            limit: state.limit,
+            count: state.members.length,
+            hasPassword: Boolean(password),
+            knock: state.knock,
+            hostUserId: identity.userId,
+          };
+        },
+      });
+      lobbyRef.current = publisher;
+      void publisher.start();
+      return;
+    }
+    lobbyRef.current.update();
+  }, [
+    selfHost,
+    snapshot.phase,
+    snapshot.closed,
+    snapshot.members.length,
+    snapshot.limit,
+    snapshot.title,
+    roomFull,
+    identity,
+    code,
+    password,
+  ]);
+
   const hostViewers = Math.max(0, snapshot.members.length - 1);
   const streamFile =
     streamInfo?.fileName ?? snapshot.playback?.src.fileName ?? localFile?.name ?? null;
@@ -1502,7 +1738,7 @@ export function RoomScreen({
   }, []);
 
   const openSite = (input: string) => {
-    if (role !== 'host') {
+    if (!selfHost) {
       return;
     }
     const url = normalizeUrl(input);
@@ -1545,13 +1781,19 @@ export function RoomScreen({
       {!pipActive && (
         <RoomBar
           code={code}
+          title={snapshot.title}
           role={role}
           mode={snapshot.mode}
           phase={snapshot.phase}
           strategy={snapshot.strategy}
           peerCount={snapshot.peerCount}
           members={snapshot.members}
+          limit={snapshot.limit}
+          closed={snapshot.closed}
+          knock={snapshot.knock}
+          pendingCount={snapshot.joinRequests.length}
           selfUserId={identity.userId}
+          hostUserId={snapshot.hostUserId}
           driverId={snapshot.driverId}
           seq={snapshot.playback?.seq ?? 0}
           drift={snapshot.drift}
@@ -1562,8 +1804,17 @@ export function RoomScreen({
           onCopy={() => void copyLink()}
           onResync={requestResync}
           onToggleZones={onToggleZones}
+          onOpenMembers={() => setModerationOpen((value) => !value)}
           onPip={enterPipMode}
           pipAvailable={pipSupported}
+        />
+      )}
+
+      {!pipActive && selfHost && (
+        <JoinRequests
+          requests={snapshot.joinRequests}
+          onAccept={acceptJoin}
+          onDeny={denyJoin}
         />
       )}
 
@@ -1591,13 +1842,13 @@ export function RoomScreen({
           zonesOpen={zonesOpen}
           onOpen={openSite}
           onTestPage={() => {
-            if (role === 'host') {
+            if (selfHost) {
               void siteRef.current.openUrl(TEST_PAGE_URL);
               clientRef.current?.publishSiteUrl(TEST_PAGE_URL);
             }
           }}
           onYoutube={() => {
-            if (role === 'host') {
+            if (selfHost) {
               void siteRef.current.openUrl(YOUTUBE_URL);
               clientRef.current?.publishSiteUrl(YOUTUBE_URL);
             }
@@ -1605,7 +1856,7 @@ export function RoomScreen({
           onNav={site.nav}
           onToggleZones={onToggleZones}
           compact
-          addressLocked={role === 'guest'}
+          addressLocked={!selfHost}
         />
       )}
 
@@ -1746,6 +1997,29 @@ export function RoomScreen({
 
       {!pipActive && viewerImageId && viewerUrl && (
         <ImageViewer url={viewerUrl} onClose={() => setViewerImageId(null)} />
+      )}
+
+      {!pipActive && (
+        <ModerationPanel
+          open={moderationOpen}
+          members={snapshot.members}
+          selfUserId={identity.userId}
+          hostUserId={snapshot.hostUserId}
+          canModerate={selfHost}
+          title={snapshot.title}
+          limit={snapshot.limit}
+          closed={snapshot.closed}
+          knock={snapshot.knock}
+          mode={snapshot.mode}
+          pendingCount={snapshot.joinRequests.length}
+          onClose={() => setModerationOpen(false)}
+          onKick={moderateKick}
+          onBan={moderateBan}
+          onMute={moderateMute}
+          onTransfer={moderateTransfer}
+          onMeta={updateMeta}
+          onCloseRoom={closeRoom}
+        />
       )}
 
       <RemoteAudio streams={remoteStreams} />

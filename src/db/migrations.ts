@@ -7,7 +7,7 @@
  */
 
 export const DB_URL = 'sqlite:heliwatch.db';
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export interface ProfileRow {
   id: number;
@@ -46,4 +46,16 @@ export interface RoomChatRow {
   body: string;
   image_path: string | null;
   saved: number;
+}
+
+/**
+ * Локальный бан-лист хоста (этап 6, §5). `expires_at = 0` — навсегда,
+ * иначе timestamp окончания. Гость тоже пишет сюда того, кто его забанил,
+ * чтобы случайно не вернуться.
+ */
+export interface BlocklistRow {
+  user_id: string;
+  reason: string;
+  created_at: number;
+  expires_at: number;
 }

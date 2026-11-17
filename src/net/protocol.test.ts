@@ -8,19 +8,31 @@ import {
   generateRoomCode,
   isCapabilityData,
   isEnvelope,
+  isHostTransferPayload,
+  isKickPayload,
+  isLobbyCard,
+  isLobbyCardPayload,
   isNonceFresh,
+  isRoomMetaPayload,
   isStateRefresh,
   isStreamStartData,
   isStreamStopData,
   isValidState,
+  normalizePassword,
   normalizeRoomCode,
+  normalizeRoomLimit,
+  normalizeRoomTitle,
   parseRoomInput,
+  passwordHash,
+  pickSuccessor,
   projectState,
   roomLimitForMode,
   roomLink,
   shouldApplyState,
+  signalingRoomId,
   signingInput,
   type Envelope,
+  type LobbyCard,
   type PlaybackState,
 } from './protocol';
 
@@ -201,5 +213,126 @@ describe('стрим файла хоста (этап 5)', () => {
         'user-host',
       ),
     ).toBe(true);
+  });
+});
+
+describe('этап 6: пароль как ключ сигналинга', () => {
+  it('комната без пароля живёт под кодом', async () => {
+    expect(await signalingRoomId('ABC234', null)).toBe('ABC234');
+    expect(await signalingRoomId('ABC234', '   ')).toBe('ABC234');
+  });
+
+  it('пароль меняет идентификатор сигналинга детерминированно', async () => {
+    const first = await signalingRoomId('ABC234', 'тайный кот');
+    const again = await signalingRoomId('ABC234', 'тайный кот');
+    const other = await signalingRoomId('ABC234', 'другой кот');
+    expect(first).toBe(again);
+    expect(first).not.toBe(other);
+    expect(first.startsWith('ABC234-')).toBe(true);
+    expect(first.length).toBeGreaterThan('ABC234'.length + 6);
+  });
+
+  it('хеш пароля привязан к коду комнаты', async () => {
+    const one = await passwordHash('ABC234', 'секрет');
+    const same = await passwordHash('ABC234', 'секрет');
+    const otherRoom = await passwordHash('XYZ789', 'секрет');
+    expect(one).toBe(same);
+    expect(one).not.toBe(otherRoom);
+    expect(one).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  it('пароль короче 4 символов не считается паролем', () => {
+    expect(normalizePassword('123')).toBeNull();
+    expect(normalizePassword(' 1234 ')).toBe('1234');
+    expect(normalizePassword('')).toBeNull();
+    expect(normalizePassword('x'.repeat(65))).toBeNull();
+  });
+});
+
+describe('этап 6: карточка лобби', () => {
+  const card = (patch: Partial<LobbyCard> = {}): LobbyCard => ({
+    code: 'ABC234',
+    title: 'Вечерний сериал',
+    mode: 'site',
+    closed: false,
+    limit: 4,
+    count: 2,
+    hasPassword: true,
+    knock: true,
+    hostUserId: 'host-user',
+    updatedAt: 1_700_000_000_000,
+    ...patch,
+  });
+
+  it('валидная карточка проходит, полезна и упаковка', () => {
+    expect(isLobbyCard(card())).toBe(true);
+    expect(isLobbyCardPayload({ card: card() })).toBe(true);
+  });
+
+  it('закрытая карточка валидна: отсутствие в лобби решает хост', () => {
+    expect(isLobbyCard(card({ closed: true }))).toBe(true);
+  });
+
+  it('count не больше лимита, лимит в границах 2–6', () => {
+    expect(isLobbyCard(card({ count: 4, limit: 4 }))).toBe(true);
+    expect(isLobbyCard(card({ count: 5, limit: 4 }))).toBe(false);
+    expect(isLobbyCard(card({ limit: 1 }))).toBe(false);
+    expect(isLobbyCard(card({ limit: 7 }))).toBe(false);
+  });
+
+  it('код нормализован, режим известен, hostUserId не пуст', () => {
+    expect(isLobbyCard(card({ code: 'abc234' }))).toBe(false);
+    expect(isLobbyCard(card({ mode: 'movie' as LobbyCard['mode'] }))).toBe(false);
+    expect(isLobbyCard(card({ hostUserId: '' }))).toBe(false);
+    expect(isLobbyCard(card({ title: '   ' }))).toBe(false);
+    expect(isLobbyCard(card({ knock: 'да' as unknown as boolean }))).toBe(false);
+  });
+});
+
+describe('этап 6: room-meta, кик и выборы хоста', () => {
+  it('room-meta принимает частичные правки и отвергает мусор', () => {
+    expect(isRoomMetaPayload({ title: 'Новое имя' })).toBe(true);
+    expect(isRoomMetaPayload({ closed: true, knock: false })).toBe(true);
+    expect(isRoomMetaPayload({ limit: 6 })).toBe(true);
+    expect(isRoomMetaPayload({})).toBe(false);
+    expect(isRoomMetaPayload({ limit: 1 })).toBe(false);
+    expect(isRoomMetaPayload({ title: 'x'.repeat(60) })).toBe(false);
+    expect(isRoomMetaPayload({ closed: 'yes' })).toBe(false);
+  });
+
+  it('kick/ban: цель обязательна, срок не отрицательный', () => {
+    expect(isKickPayload({ target: 'user-a' })).toBe(true);
+    expect(isKickPayload({ target: 'user-a', reason: 'спам', until: 123 })).toBe(true);
+    expect(isKickPayload({ target: '' })).toBe(false);
+    expect(isKickPayload({ target: 'user-a', until: -1 })).toBe(false);
+    expect(isHostTransferPayload({ target: 'user-a', epoch: 2 })).toBe(true);
+    expect(isHostTransferPayload({ target: 'user-a', epoch: 0 })).toBe(false);
+  });
+
+  it('преемник хоста выбирается по userId, а не по часам устройств', () => {
+    expect(
+      pickSuccessor([
+        { userId: 'user-c', host: false },
+        { userId: 'user-a', host: false },
+        { userId: 'host', host: true },
+      ]),
+    ).toBe('user-a');
+    expect(pickSuccessor([{ userId: 'host', host: true }])).toBeNull();
+    expect(pickSuccessor([])).toBeNull();
+  });
+});
+
+describe('этап 6: нормализация настроек комнаты', () => {
+  it('название обрезается, пустое — дефолт по коду', () => {
+    expect(normalizeRoomTitle('  Кино  ', 'ABC234')).toBe('Кино');
+    expect(normalizeRoomTitle('', 'ABC234')).toBe('Комната ABC234');
+    expect(normalizeRoomTitle('x'.repeat(80), 'ABC234')).toHaveLength(48);
+  });
+
+  it('лимит в режиме B жёстко 3, иначе 2–6', () => {
+    expect(normalizeRoomLimit(6, 'stream')).toBe(3);
+    expect(normalizeRoomLimit(6, 'site')).toBe(6);
+    expect(normalizeRoomLimit(1, 'site')).toBe(2);
+    expect(normalizeRoomLimit(Number.NaN, 'site')).toBe(4);
   });
 });

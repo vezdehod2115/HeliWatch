@@ -29,7 +29,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 | 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ✅ завершён | 17.11.2026 | 0.3.0: голос с replaceTrack без renegotiation, индикатор речи и ducking, чат с typing и историей по желанию, фото чанками 16 КиБ по `hw-blob`, эмодзи и 8 быстрых реакций |
 | 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ✅ завершён | 17.11.2026 | 0.4.0: PiP с тремя RemoteAction, автовход на Android 12+ и `onUserLeaveHint` на 8–11; foreground-сервис mediaPlayback → microphone; TimerGuard (`onResume` + `resumeTimers` после `super`); `FLAG_KEEP_SCREEN_ON`; строка сообщения и тикающее время в PiP |
 | 5 | Стрим файла с телефона хоста | 0.5.0 | ✅ завершён | 17.11.2026 | 0.5.0: режим B — `captureStream()` + canvas/WebAudio фоллбэк, `stream-start/stop/capability`, до 2 зрителей, .mkv с предупреждением, хост-драйвер и закрытие комнаты при его уходе |
-| 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ⬜ не начат | — | — |
+| 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ✅ завершён | 17.11.2026 | 0.6.0: лобби `heliwatch-lobby-v1` с подписанными карточками (TTL 70 с, announce 25 ± 5 с, антиспам 1/5 с, probe), пароль как ключ сигналинга (`signalingRoomId` + `pwHash` в join), «стук» с join-accept/deny, kick/ban/mute-request, передача хоста и миграция в A/C (режим B закрывается), лимиты 2–6, бан-лист в SQLite (миграция v3) |
 | 7 | Друзья, DM, статистика, бэкап, динамический акцент, age-gate | 0.7.0 | ⬜ не начат | — | — |
 
 ## 1. Версии и стек (зафиксировано)
@@ -221,7 +221,7 @@ HeliWatch/
 | `image-start` / `image-chunk` / `image-end` / `image-cancel` | `id`, `mime`, `size`, `w`, `h`, `chunks`, `scope`, `to?` | 1→1 или всем | — |
 | `stream-start` / `stream-stop` / `capability` | `fileName?`, `duration?`, `videoHash?`, `maxViewers`, `capture:direct\|canvas` / `reason?` / `canCapture`, `maxViewers`, `capture?` | хост→всем | — |
 | `lobby-probe` | — | новичок в лобби | — |
-| `lobby-announce` / `lobby-update` / `lobby-remove` | `card{code,title,mode,closed,limit,count,hasPassword,hostUserId,updatedAt}` | всем в лобби | ✔ |
+| `lobby-announce` / `lobby-update` / `lobby-remove` | `card{code,title,mode,closed,limit,count,hasPassword,knock?,hostUserId,updatedAt}` | всем в лобби | ✔ |
 | `kick` / `ban` | `target`, `reason`, `until?` | хост→target + всем | ✔ |
 | `mute-request` | `target` | хост→target | — |
 | `host-transfer` / `host-claim` | `target`, `epoch` / `epoch` | всем | ✔ / — |
@@ -244,7 +244,7 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 2. Эхо-защита: `isRemoteAction` в React (команда из сети не отправляется обратно), `applyingRemote` на 800 мс в инжекте, подавление событий, вызванных нами же (сверка `expectedT` ±0.3 с).
 3. Автокоррекция: расхождение > 1.5 с → `seek`; 0.3–1.5 с → временный `rate` 1.05/0.95 на 4 с (A/C, если сайт поддерживает); < 0.3 с — ничего. Не более 1 коррекции в 2 с, не более 5 команд в 5 с на пира.
 4. `status: buffering` и `waiting` → коррекции пауза 5 с; `playing=false` у driver'а → все стоят.
-5. Хост ушёл: successor = min(`joinedAt`, `userId`) среди оставшихся, рассылает `host-claim{epoch+1}`; в режиме B комната закрывается (`bye: host-left`), миграции нет.
+5. Хост ушёл: successor = участник с минимальным `userId` среди оставшихся (порядок по `joinedAt` не годится — он приходит с часов хоста и у гостей расходится, выборы были бы недетерминированными), преемник рассылает `host-claim{epoch+1}`; в режиме B комната закрывается (`bye: host-left`), миграции нет. Передача хоста штатно — подписанный `host-transfer`, цель подтверждает `host-claim`.
 6. `control-lock` от хоста запрещает `play/pause/seek` зрителям (они видят «управляет хост»); `resync` разрешён всегда.
 
 ### 4.6 Пересогласование треков (после входа в комнату)

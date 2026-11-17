@@ -7,15 +7,24 @@ import {
 import type { LocalProfile } from '../../db/repo/identity';
 import type { Identity } from '../../net/identity';
 import { NAME_MAX, NAME_MIN } from '../../db/repo/profile';
-import { parseRoomInput, type RoomMode } from '../../net/protocol';
+import {
+  ROOM_LIMIT_MAX,
+  ROOM_LIMIT_MIN,
+  normalizePassword,
+  parseRoomInput,
+  type RoomMode,
+} from '../../net/protocol';
+import { LobbyList } from './LobbyList';
+import { useLobby } from './useLobby';
+import { DEFAULT_ROOM_LIMIT, type RoomSetup } from './types';
 
 interface HomeScreenProps {
   identity: Identity;
   profile: LocalProfile;
   persisted: boolean;
   initialCode: { code: string; at: number } | null;
-  onCreate: (mode: RoomMode) => void;
-  onJoin: (code: string) => void;
+  onCreate: (setup: RoomSetup) => void;
+  onJoin: (code: string, password: string | null) => void;
   onOpenRecent: (code: string, mode: RoomMode) => void;
   onRename: (name: string) => Promise<boolean>;
   onCodeConsumed?: () => void;
@@ -37,7 +46,7 @@ function relativeTime(timestamp: number): string {
   return `${Math.round(hours / 24)} дн назад`;
 }
 
-/** Главный экран: профиль, создание комнаты, вход по коду и недавние комнаты. */
+/** Главный экран: лобби, создание комнаты, вход по коду и недавние комнаты. */
 export function HomeScreen({
   identity,
   profile,
@@ -50,11 +59,19 @@ export function HomeScreen({
   onCodeConsumed,
   notify,
 }: HomeScreenProps) {
+  const lobby = useLobby();
   const [name, setName] = useState(profile.displayName);
   const [nameBusy, setNameBusy] = useState(false);
   const [joinValue, setJoinValue] = useState('');
+  const [joinPassword, setJoinPassword] = useState('');
   const [joinError, setJoinError] = useState<string | null>(null);
   const [mode, setMode] = useState<RoomMode>('site');
+  const [title, setTitle] = useState('');
+  const [limit, setLimit] = useState(DEFAULT_ROOM_LIMIT);
+  const [closed, setClosed] = useState(false);
+  const [knock, setKnock] = useState(false);
+  const [password, setPassword] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
   const [recent, setRecent] = useState<RecentRoom[]>([]);
   const joinRef = useRef<HTMLInputElement>(null);
 
@@ -104,8 +121,32 @@ export function HomeScreen({
       joinRef.current?.focus();
       return;
     }
+    const rawPassword = joinPassword.trim();
+    const normalized = rawPassword ? normalizePassword(rawPassword) : null;
+    if (rawPassword && !normalized) {
+      setJoinError('Пароль от 4 до 64 символов');
+      return;
+    }
     setJoinError(null);
-    onJoin(code);
+    onJoin(code, normalized);
+  };
+
+  const submitCreate = () => {
+    const rawPassword = password.trim();
+    const normalized = rawPassword ? normalizePassword(rawPassword) : null;
+    if (rawPassword && !normalized) {
+      setCreateError('Пароль от 4 до 64 символов');
+      return;
+    }
+    setCreateError(null);
+    onCreate({
+      mode,
+      title: title.trim(),
+      limit: mode === 'stream' ? 3 : Math.max(ROOM_LIMIT_MIN, Math.min(ROOM_LIMIT_MAX, limit)),
+      closed,
+      knock,
+      password: normalized,
+    });
   };
 
   return (
@@ -148,6 +189,15 @@ export function HomeScreen({
           </div>
         </section>
 
+        <LobbyList
+          cards={lobby.cards}
+          phase={lobby.phase}
+          error={lobby.error}
+          strategy={lobby.strategy}
+          onJoin={(code, cardPassword) => onJoin(code, cardPassword)}
+          onRefresh={lobby.refresh}
+        />
+
         <section className="hw-card">
           <div className="hw-card-head">
             <Icon name="play" size={18} />
@@ -185,6 +235,92 @@ export function HomeScreen({
               <span>У каждого телефона свой файл. Синхронизируется только таймкод — размеры и кодеки могут отличаться.</span>
             </button>
           </div>
+
+          <div className="hw-create-grid">
+            <label className="hw-create-row">
+              <span>Название</span>
+              <input
+                className="hw-field"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                maxLength={48}
+                placeholder={`Комната ${mode === 'site' ? 'по коду' : mode === 'stream' ? 'с раздачей' : 'с файлом'}`}
+              />
+            </label>
+            <label className="hw-create-row">
+              <span>Участников</span>
+              <select
+                className="hw-field"
+                value={mode === 'stream' ? 3 : limit}
+                onChange={(event) => setLimit(Number(event.target.value))}
+                disabled={mode === 'stream'}
+                aria-label="Максимум участников"
+              >
+                {[2, 3, 4, 5, 6].map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="hw-create-row">
+              <span>Пароль</span>
+              <input
+                className="hw-field"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                  setCreateError(null);
+                }}
+                type="password"
+                autoComplete="off"
+                maxLength={64}
+                placeholder="без пароля"
+              />
+            </label>
+          </div>
+
+          <div className="hw-toggles">
+            <button
+              type="button"
+              className={`hw-toggle${closed ? ' is-on' : ''}`}
+              aria-pressed={closed}
+              onClick={() => setClosed((value) => !value)}
+            >
+              <Icon name="lock" size={15} />
+              <span>
+                <strong>Закрытая</strong>
+                <small>не публикуется в лобби, вход только по коду</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`hw-toggle${knock ? ' is-on' : ''}`}
+              aria-pressed={knock}
+              onClick={() => setKnock((value) => !value)}
+            >
+              <Icon name="door" size={15} />
+              <span>
+                <strong>Стучаться</strong>
+                <small>новых пускаем только после подтверждения</small>
+              </span>
+            </button>
+          </div>
+
+          {createError && <p className="hw-formerror">{createError}</p>}
+          {!closed && (
+            <p className="hw-note">
+              Открытая комната попадает в список лобби. Карточка исчезает при
+              заполнении, закрытии или через 70 секунд после ухода хоста.
+            </p>
+          )}
+          {password.trim() && (
+            <p className="hw-note">
+              Пароль — ключ сигналинга: комната живёт в отдельном канале,
+              производном от кода и пароля, поэтому без пароля вас не найдут даже
+              зная код. Хост дополнительно проверяет хеш пароля при входе.
+            </p>
+          )}
           {mode === 'stream' ? (
             <p className="hw-note">
               Раздача идёт напрямую с вашего телефона: канал мобильного хоста
@@ -192,11 +328,7 @@ export function HomeScreen({
               выше. MKV может не воспроизводиться — приоритет у MP4 и WebM.
             </p>
           ) : null}
-          <button
-            type="button"
-            className="hw-primary"
-            onClick={() => onCreate(mode)}
-          >
+          <button type="button" className="hw-primary" onClick={submitCreate}>
             Создать комнату и получить код
           </button>
         </section>
@@ -227,11 +359,27 @@ export function HomeScreen({
               Войти
             </button>
           </form>
+          <form className="hw-inlineform" onSubmit={submitJoin}>
+            <input
+              className="hw-field"
+              value={joinPassword}
+              onChange={(event) => {
+                setJoinPassword(event.target.value);
+                setJoinError(null);
+              }}
+              type="password"
+              autoComplete="off"
+              maxLength={64}
+              placeholder="Пароль, если комната закрыта"
+              aria-label="Пароль комнаты (если есть)"
+            />
+          </form>
           {joinError && <p className="hw-formerror">{joinError}</p>}
           <p className="hw-note">
             Ссылка <code>heliwatch://r/&lt;код&gt;</code> открывает приложение сразу
             на этой комнате. Код чувствителен к регистру только на вид — мы
-            приводим его к верхнему.
+            приводим его к верхнему. У комнаты с паролем код без пароля не
+            соединит: сигналинг у неё в другом канале.
           </p>
         </section>
 
@@ -269,7 +417,7 @@ export function HomeScreen({
           <span className="hw-dot is-live" />
           <span>
             P2P без своих серверов: сигналинг — публичные релеи, медиа и данные
-            идут напрямую. Голос, чат, PiP и раздача файла хоста уже в этой сборке.
+            идут напрямую. Лобби, пароли, стук и модерация уже в этой сборке.
           </span>
         </footer>
       </div>

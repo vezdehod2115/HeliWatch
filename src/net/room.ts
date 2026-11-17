@@ -19,6 +19,7 @@ import {
   PROTOCOL_VERSION,
   ROOM_LIMIT_DEFAULT,
   ROOM_LIMIT_MAX,
+  ROOM_LIMIT_MIN,
   createEnvelope,
   createNonce,
   createUlid,
@@ -26,29 +27,43 @@ import {
   isChatPayload,
   isEmojiSequence,
   isEnvelope,
+  isHostClaimPayload,
+  isHostTransferPayload,
   isImageCancelPayload,
   isImageEndPayload,
+  isKickPayload,
+  isMuteRequestPayload,
   isNonceFresh,
   isReactionPayload,
+  isRoomMetaPayload,
   isStateRefresh,
   isStreamStartData,
   isStreamStopData,
   isTypingPayload,
   isValidState,
   normalizeChatText,
+  normalizePassword,
   normalizeRoomCode,
-  roomLimitForMode,
+  normalizeRoomLimit,
+  normalizeRoomTitle,
+  passwordHash,
+  pickSuccessor,
   sampleFromState,
   shouldApplyState,
+  signalingRoomId,
   stateFromSample,
   type ByeData,
   type CapabilityData,
   type ChatMessage,
   type Envelope,
   type HelloData,
+  type HostClaimPayload,
+  type HostTransferPayload,
   type ImageScope,
   type JoinData,
+  type KickPayload,
   type MemberInfo,
+  type MuteRequestPayload,
   type PlaybackAction,
   type PlaybackSample,
   type PlaybackSource,
@@ -56,6 +71,7 @@ import {
   type ProfilePayload,
   type ReactionPayload,
   type RoomMeta,
+  type RoomMetaPayload,
   type RoomMode,
   type RoomRole,
   type SiteUrlData,
@@ -83,6 +99,15 @@ export type RoomPhase =
   | 'closed'
   | 'error';
 
+/** «Стук»: гость прошёл проверку подписи и ждёт решения хоста (§4.2, этап 6). */
+export interface JoinRequestInfo {
+  userId: string;
+  peerId: string;
+  name: string;
+  color: string;
+  at: number;
+}
+
 export type RoomEvent =
   | { type: 'phase'; phase: RoomPhase; message?: string }
   | { type: 'strategy'; strategy: string; relays: number }
@@ -94,6 +119,19 @@ export type RoomEvent =
       hostUserId: string;
       state: PlaybackState;
     }
+  | { type: 'meta'; meta: RoomMeta }
+  | { type: 'host-changed'; hostUserId: string; epoch: number; self: boolean }
+  | { type: 'join-request'; request: JoinRequestInfo }
+  | {
+      type: 'join-decision';
+      accepted: boolean;
+      userId: string;
+      name: string;
+      reason?: string;
+    }
+  | { type: 'moderation'; action: 'kick' | 'ban'; userId: string; name: string; until?: number }
+  | { type: 'kicked'; reason: 'kicked' | 'banned'; by: string; until?: number }
+  | { type: 'mute-request'; by: string; name: string }
   | { type: 'state'; state: PlaybackState; receivedAt: number; drift: number | null }
   | { type: 'command'; action: PlaybackAction; from: string }
   | { type: 'correction'; action: PlaybackAction }
@@ -138,12 +176,22 @@ export interface RoomClientOptions {
   mode: RoomMode;
   identity: Identity;
   profile: ProfilePayload;
-  connect: (strategy: StrategyId) => Promise<Channel>;
+  /**
+   * Второй аргумент — идентификатор trystero-комнаты. Для комнаты с паролем он
+   * производный от пароля (§4.8): без пароля гость не найдёт хост в сигналинге.
+   */
+  connect: (strategy: StrategyId, roomId: string) => Promise<Channel>;
   onEvent: (event: RoomEvent) => void;
   initialUrl?: string;
   now?: () => number;
   /** Таймеры выключаются в тестах, чтобы процесс завершался сразу. */
   autoTimers?: boolean;
+  /** Настройки комнаты, которые задаёт хост при создании (этап 6). */
+  meta?: Partial<Pick<RoomMeta, 'title' | 'limit' | 'closed' | 'knock'>>;
+  /** Пароль комнаты: ключ сигналинга и проверка в join. */
+  password?: string | null;
+  /** Хост сверяет локальный бан-лист перед входом гостя. */
+  isBanned?: (userId: string) => boolean | Promise<boolean>;
 }
 
 interface PeerAuth {
@@ -159,6 +207,8 @@ interface PeerAuth {
   localNonceUsed?: boolean;
   host: boolean;
   joined: boolean;
+  /** Прошёл подпись, но ждёт решения хоста («стук»). */
+  pending?: boolean;
   profile?: ProfilePayload;
   joinedAt?: number;
   limiter: CommandRateLimiter;
@@ -253,7 +303,7 @@ export class RoomClient {
 
   private readonly identity: Identity;
   private readonly profile: ProfilePayload;
-  private readonly connect: (strategy: StrategyId) => Promise<Channel>;
+  private readonly connect: (strategy: StrategyId, roomId: string) => Promise<Channel>;
   private readonly emit: (event: RoomEvent) => void;
   private readonly now: () => number;
   private readonly autoTimers: boolean;
@@ -267,10 +317,17 @@ export class RoomClient {
   private version: StateVersion;
   private stateReceivedAt = 0;
   private hostUserId: string | null = null;
+  /** Эпоха хоста: растёт при передаче и миграции (§4.5, этап 6). */
+  private epochValue = 1;
   private selfPeerId = '';
   private selfJoinedAt = 0;
   private peers = new Map<string, PeerAuth>();
   private members = new Map<string, MemberInfo>();
+  /** «Стук»: подпись проверена, ждём решения хоста. */
+  private readonly pendingJoins = new Map<string, JoinRequestInfo>();
+  private readonly isBanned: (userId: string) => boolean | Promise<boolean>;
+  private readonly password: string | null;
+  private passwordHashValue = '';
   private seenIds = new Set<string>();
   private queue: Promise<void> = Promise.resolve();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -317,14 +374,21 @@ export class RoomClient {
     this.autoTimers = options.autoTimers ?? true;
     this.selfJoinedAt = this.now();
     this.openedAt = this.selfJoinedAt;
+    this.password = normalizePassword(options.password ?? null);
+    this.isBanned = options.isBanned ?? (() => false);
+    const limit = normalizeRoomLimit(options.meta?.limit, options.mode);
     this.meta = {
       code,
-      title: `Комната ${code}`,
+      title: normalizeRoomTitle(options.meta?.title, code),
       mode: options.mode,
-      limit: roomLimitForMode(options.mode),
-      closed: false,
-      knock: false,
+      limit,
+      closed: options.meta?.closed === true,
+      knock: options.meta?.knock === true,
     };
+    if (options.role === 'host') {
+      // Хост — авторитет комнаты с самого начала: welcome и проверка join.
+      this.hostUserId = this.selfUserId;
+    }
     this.stateValue = {
       playing: false,
       t: 0,
@@ -377,6 +441,28 @@ export class RoomClient {
     return this.hostUserId;
   }
 
+  /** Текущий хост — это я. После миграции роль меняется на лету (§4.5). */
+  get selfIsHost(): boolean {
+    return this.hostUserId !== null && this.hostUserId === this.selfUserId;
+  }
+
+  /** Эпоха хоста: защищает от «двух хостов» после передачи и ухода. */
+  get epoch(): number {
+    return this.epochValue;
+  }
+
+  get roomMeta(): RoomMeta {
+    return this.meta;
+  }
+
+  get memberCount(): number {
+    return this.memberList.length;
+  }
+
+  get joinRequests(): JoinRequestInfo[] {
+    return [...this.pendingJoins.values()];
+  }
+
   get peerCount(): number {
     return this.peers.size;
   }
@@ -389,7 +475,7 @@ export class RoomClient {
       color: this.profile.color,
       avatarHash: this.profile.avatarHash,
       joinedAt: this.selfJoinedAt,
-      host: this.role === 'host',
+      host: this.selfIsHost,
     };
     const all = [self, ...this.members.values()].filter(
       (member, index, list) => list.findIndex((item) => item.userId === member.userId) === index,
@@ -416,6 +502,10 @@ export class RoomClient {
   async start(): Promise<void> {
     this.stopped = false;
     this.openedAt = this.now();
+    if (this.password) {
+      // Хеш нужен и хосту (проверка join), и гостю (поле pwHash в join).
+      this.passwordHashValue = await passwordHash(this.code, this.password);
+    }
     await this.openChannel();
     this.startTimers();
   }
@@ -511,7 +601,7 @@ export class RoomClient {
 
   /** Хост сменил URL сайта: state + отдельное сообщение site-url. */
   publishSiteUrl(url: string): void {
-    if (this.role !== 'host' || !this.canControl()) {
+    if (!this.selfIsHost || !this.canControl()) {
       return;
     }
     const seq = this.stateValue.seq + 1;
@@ -525,6 +615,191 @@ export class RoomClient {
     const data: SiteUrlData = { url };
     this.sendState();
     this.send('site-url', data);
+  }
+
+  // ---------- Модерация и настройки комнаты (этап 6) ----------
+
+  /** Хост меняет название, лимит, закрытость и «стук»; сообщение подписано. */
+  updateRoomMeta(patch: RoomMetaPayload): boolean {
+    if (!this.selfIsHost || !this.canPublish() || !isRoomMetaPayload(patch)) {
+      return false;
+    }
+    const limit =
+      patch.limit !== undefined
+        ? Math.max(this.memberCount, normalizeRoomLimit(patch.limit, this.meta.mode))
+        : this.meta.limit;
+    const next: RoomMetaPayload = {
+      title: patch.title !== undefined ? normalizeRoomTitle(patch.title, this.code) : undefined,
+      limit,
+      closed: patch.closed ?? this.meta.closed,
+      knock: patch.knock ?? this.meta.knock,
+    };
+    this.meta = {
+      ...this.meta,
+      title: next.title ?? this.meta.title,
+      limit,
+      closed: next.closed === true,
+      knock: next.knock === true,
+    };
+    void this.sendSigned('room-meta', next);
+    this.emit({ type: 'meta', meta: this.meta });
+    this.emitMembers();
+    return true;
+  }
+
+  /** Принять «стук»: гость получает welcome и появляется в составе. */
+  acceptJoin(userId: string): boolean {
+    if (!this.selfIsHost) {
+      return false;
+    }
+    const entry = [...this.pendingJoins.values()].find((item) => item.userId === userId);
+    if (!entry) {
+      return false;
+    }
+    const peer = this.peers.get(entry.peerId);
+    const profile = peer?.profile;
+    if (!peer || !profile) {
+      this.pendingJoins.delete(entry.peerId);
+      return false;
+    }
+    if (peer.localNonceUsed || !isNonceFresh(this.now(), peer.localNonceAt ?? 0)) {
+      // Пока хост думал, nonce истёк: просим гостя постучаться заново.
+      this.denyJoin(userId, 'nonce-expired');
+      return false;
+    }
+    this.send('join-accept', {}, entry.peerId);
+    this.pendingJoins.delete(entry.peerId);
+    void this.admitJoin(entry.peerId, profile);
+    this.emit({ type: 'join-decision', accepted: true, userId, name: entry.name });
+    return true;
+  }
+
+  /** Отклонить «стук»: гость видит понятную ошибку, а не пустое ожидание. */
+  denyJoin(userId: string, reason = 'knock-denied'): boolean {
+    if (!this.selfIsHost) {
+      return false;
+    }
+    const entry = [...this.pendingJoins.values()].find((item) => item.userId === userId);
+    if (!entry) {
+      return false;
+    }
+    this.send('join-deny', { reason }, entry.peerId);
+    const peer = this.peers.get(entry.peerId);
+    if (peer) {
+      peer.pending = false;
+    }
+    this.pendingJoins.delete(entry.peerId);
+    this.emit({ type: 'join-decision', accepted: false, userId, name: entry.name, reason });
+    return true;
+  }
+
+  /** Кик: подписанное сообщение всем, участник исчезает из состава. */
+  kick(userId: string, reason = 'host-kick'): boolean {
+    return this.removeMember(userId, 'kick', { target: userId, reason });
+  }
+
+  /** Бан: подписанное сообщение + срок; хост ещё и пишет его в бан-лист. */
+  ban(userId: string, reason = 'host-ban', until?: number): boolean {
+    const payload: KickPayload = until !== undefined ? { target: userId, reason, until } : { target: userId, reason };
+    return this.removeMember(userId, 'ban', payload, until);
+  }
+
+  private removeMember(
+    userId: string,
+    type: 'kick' | 'ban',
+    payload: KickPayload,
+    until?: number,
+  ): boolean {
+    if (!this.selfIsHost || !this.canPublish()) {
+      return false;
+    }
+    const member = this.members.get(userId);
+    const peer = this.peerForUser(userId);
+    if (!member && !peer) {
+      return false;
+    }
+    void this.sendSigned(type, payload);
+    this.members.delete(userId);
+    if (peer) {
+      this.peers.delete(peer.peerId);
+      this.pendingScreens.delete(peer.peerId);
+    }
+    this.emit({
+      type: 'moderation',
+      action: type === 'ban' ? 'ban' : 'kick',
+      userId,
+      name: member?.name ?? peer?.profile?.name ?? 'Участник',
+      until,
+    });
+    this.emitMembers();
+    this.broadcastWelcome();
+    this.emit({
+      type: 'peer-left',
+      peerId: peer?.peerId ?? member?.peerId ?? '',
+      userId,
+    });
+    this.emitDebug();
+    return true;
+  }
+
+  /** Попросить участника выключить микрофон (best effort, без подписи). */
+  requestMute(userId: string): boolean {
+    if (!this.selfIsHost || !this.canPublish()) {
+      return false;
+    }
+    const peer = this.peerForUser(userId);
+    if (!peer) {
+      return false;
+    }
+    const payload: MuteRequestPayload = { target: userId };
+    this.send('mute-request', payload, peer.peerId);
+    return true;
+  }
+
+  /** Передать хост другому участнику (только A/C, подписанный host-transfer). */
+  transferHost(userId: string): boolean {
+    if (!this.selfIsHost || !this.canPublish() || userId === this.selfUserId) {
+      return false;
+    }
+    if (!this.members.has(userId) && !this.peersHasUser(userId)) {
+      return false;
+    }
+    const epoch = this.epochValue + 1;
+    const payload: HostTransferPayload = { target: userId, epoch };
+    void this.sendSigned('host-transfer', payload);
+    this.epochValue = epoch;
+    this.hostUserId = userId;
+    this.pendingJoins.clear();
+    this.emit({
+      type: 'host-changed',
+      hostUserId: userId,
+      epoch,
+      self: false,
+    });
+    this.emitMembers();
+    this.emitDebug();
+    return true;
+  }
+
+  /** Закрыть комнату для всех: подписанный room-meta + bye: closed. */
+  closeRoom(): void {
+    if (!this.selfIsHost || !this.canPublish()) {
+      return;
+    }
+    this.meta = { ...this.meta, closed: true };
+    void this.sendSigned('room-meta', { closed: true } satisfies RoomMetaPayload);
+    this.send('bye', { reason: 'closed' } satisfies ByeData);
+    this.finish('closed');
+  }
+
+  private peerForUser(userId: string): PeerAuth | null {
+    for (const peer of this.peers.values()) {
+      if (peer.userId === userId) {
+        return peer;
+      }
+    }
+    const member = this.members.get(userId);
+    return member ? (this.peers.get(member.peerId) ?? null) : null;
   }
 
   // ---------- Стрим файла хоста (этап 5) ----------
@@ -547,7 +822,7 @@ export class RoomClient {
   /** `stream-start`: хост начал раздавать файл (только режим B). */
   publishStreamStart(info: StreamStartData): void {
     if (
-      this.role !== 'host' ||
+      !this.selfIsHost ||
       this.meta.mode !== 'stream' ||
       !this.canControl() ||
       !isStreamStartData(info)
@@ -561,7 +836,7 @@ export class RoomClient {
 
   /** `stream-stop`: раздача окончена; у зрителей гаснет картинка. */
   publishStreamStop(reason: StreamStopData['reason'] = 'host-stop'): void {
-    if (this.role !== 'host' || !this.canPublish()) {
+    if (!this.selfIsHost || !this.canPublish()) {
       return;
     }
     const wasActive = this.streamActive;
@@ -575,7 +850,7 @@ export class RoomClient {
 
   /** `capability`: честно сообщаем, умеет ли устройство захватывать видео. */
   publishCapability(capability: CapabilityData): void {
-    if (this.role !== 'host' || this.meta.mode !== 'stream' || !this.canPublish()) {
+    if (!this.selfIsHost || this.meta.mode !== 'stream' || !this.canPublish()) {
       return;
     }
     if (!isCapabilityData(capability)) {
@@ -743,10 +1018,13 @@ export class RoomClient {
     }
     this.resetPeerState();
     const strategy = STRATEGIES[this.strategyIndex % STRATEGIES.length] ?? 'nostr';
-    this.setPhase(this.role === 'host' ? 'waiting' : 'connecting');
+    this.setPhase(this.selfIsHost ? 'waiting' : 'connecting');
     let channel: Channel;
     try {
-      channel = await this.connect(strategy);
+      // Комната с паролем живёт в другом trystero-roomId (§4.8): код без
+      // пароля в сигналинге бесполезен.
+      const roomId = await signalingRoomId(this.code, this.password);
+      channel = await this.connect(strategy, roomId);
     } catch (error) {
       this.emit({
         type: 'error',
@@ -777,7 +1055,7 @@ export class RoomClient {
     this.emit({ type: 'strategy', strategy, relays: this.relayCountValue() });
     this.emitMembers();
     this.armConnectCheck();
-    if (this.role === 'host') {
+    if (this.selfIsHost) {
       this.setPhase('joined');
     }
     if (this.hintShown) {
@@ -821,7 +1099,7 @@ export class RoomClient {
         // и медиа могут обогнать welcome — поток придержим до авторизации.
         if (
           peer?.joined ||
-          (this.role === 'guest' && peer?.userId && peer.userId === this.hostUserId)
+          (!this.selfIsHost && peer?.userId && peer.userId === this.hostUserId)
         ) {
           this.emit({
             type: 'screen-stream',
@@ -829,7 +1107,7 @@ export class RoomClient {
             userId: peer?.userId ?? null,
             stream,
           });
-        } else if (this.role === 'guest') {
+        } else if (!this.selfIsHost) {
           this.pendingScreens.set(peerId, stream);
         }
         return;
@@ -881,12 +1159,22 @@ export class RoomClient {
         this.hintShown = true;
         this.emit({
           type: 'hint',
-          message:
-            'Пока никого нет. Проверьте код комнаты и сеть; при симметричном NAT может понадобиться TURN.',
+          message: this.noPeersHint(),
         });
       }
       this.armConnectCheck();
     }, CONNECT_CHECK_MS);
+  }
+
+  /**
+   * Подсказка «никого нет». У комнаты с паролем причина чаще всего — неверный
+   * пароль: сигналинг-комната у неё другая, и хост просто не находится.
+   */
+  private noPeersHint(): string {
+    if (this.password) {
+      return 'Никто не отвечает. Проверьте код и пароль: с неверным паролем комната не находится в сигналинге, а не отклоняет вход.';
+    }
+    return 'Пока никого нет. Проверьте код комнаты и сеть; при симметричном NAT может понадобиться TURN.';
   }
 
   private startTimers(): void {
@@ -899,11 +1187,7 @@ export class RoomClient {
       this.hintTimer = null;
       if (!this.stopped && this.peers.size === 0 && !this.hintShown) {
         this.hintShown = true;
-        this.emit({
-          type: 'hint',
-          message:
-            'Соединение ещё не установлено. Проверьте код, сеть и доступность релеев; при симметричном NAT нужен TURN.',
-        });
+        this.emit({ type: 'hint', message: this.noPeersHint() });
       }
     }, CONNECT_HINT_MS);
   }
@@ -926,7 +1210,7 @@ export class RoomClient {
     }
     // Гость потерял хоста без bye (обрыв сети): переподключаемся.
     if (
-      this.role === 'guest' &&
+      !this.selfIsHost &&
       this.hostUserId !== null &&
       peers === 0 &&
       this.phaseValue === 'joined'
@@ -965,9 +1249,12 @@ export class RoomClient {
   }
 
   private resetPeerState(): void {
+    const wasHost = this.selfIsHost;
     this.peers.clear();
     this.members.clear();
-    this.hostUserId = null;
+    this.pendingJoins.clear();
+    // Хост после реконнекта снова хост: иначе он перестанет принимать join.
+    this.hostUserId = wasHost ? this.selfUserId : null;
     this.disposeChannel();
   }
 
@@ -985,7 +1272,7 @@ export class RoomClient {
    * зритель получает уже собранный поток и не может перемотать его у себя.
    */
   private canControl(): boolean {
-    return this.canPublish() && !(this.meta.mode === 'stream' && this.role === 'guest');
+    return this.canPublish() && !(this.meta.mode === 'stream' && !this.selfIsHost);
   }
 
   // ---------- Входящие сообщения ----------
@@ -1004,17 +1291,27 @@ export class RoomClient {
         await this.handleHello(raw, peerId);
         return;
       case 'join':
-        if (this.role === 'host') {
+        // После миграции хоста join принимает уже другой участник (§4.5).
+        if (this.selfIsHost) {
           await this.handleJoin(raw, peerId);
         }
         return;
       case 'welcome':
-        if (this.role === 'guest') {
+        if (!this.selfIsHost) {
           await this.handleWelcome(raw, peerId);
         }
         return;
       case 'join-deny':
         this.handleJoinDeny(raw);
+        return;
+      case 'join-accept':
+        // Гость просто ждёт welcome; accept нужен только чтобы снять «стук».
+        return;
+      case 'host-transfer':
+        await this.handleHostTransfer(raw, peerId);
+        return;
+      case 'host-claim':
+        this.handleHostClaim(raw);
         return;
       default:
         break;
@@ -1088,8 +1385,18 @@ export class RoomClient {
           this.images.cancel(peer.peerId, raw.d.id);
         }
         return;
+      case 'room-meta':
+        await this.handleRoomMeta(raw, peer);
+        return;
+      case 'mute-request':
+        this.handleMuteRequest(raw);
+        return;
+      case 'kick':
+      case 'ban':
+        await this.handleModeration(raw, peer);
+        return;
       default:
-        // Остальные типы протокола появятся на этапах 4–7.
+        // Остальные типы протокола появятся на следующих этапах.
         return;
     }
   }
@@ -1204,7 +1511,7 @@ export class RoomClient {
         userId: peer.userId,
       });
       this.emitMembers();
-      if (this.role === 'guest' && peer.userId === this.hostUserId) {
+      if (!this.selfIsHost && peer.userId === this.hostUserId) {
         // Без bye это обрыв сети, а не осознанный выход хоста.
         this.scheduleReconnect();
       }
@@ -1254,7 +1561,12 @@ export class RoomClient {
     peer.profile = profile;
     this.peers.set(peerId, peer);
 
-    if (this.role === 'guest' && data.host) {
+    if (this.members.has(data.userId)) {
+      // Состав подтверждён хостом в welcome: сообщения этого пира принимаем.
+      peer.joined = true;
+    }
+
+    if (!this.selfIsHost && data.host) {
       if (this.hostUserId && this.hostUserId !== data.userId) {
         return;
       }
@@ -1275,7 +1587,7 @@ export class RoomClient {
       nonce,
       pub: this.identity.publicJwk,
       userId: this.selfUserId,
-      host: this.role === 'host',
+      host: this.selfIsHost,
       profile: this.profile,
       ver: PROTOCOL_VERSION,
     };
@@ -1289,6 +1601,13 @@ export class RoomClient {
       profile: this.profile,
       ver: PROTOCOL_VERSION,
     };
+    if (this.password) {
+      // Гость доказывает знание пароля: хеш привязан к коду комнаты.
+      if (!this.passwordHashValue) {
+        this.passwordHashValue = await passwordHash(this.code, this.password);
+      }
+      data.pwHash = this.passwordHashValue;
+    }
     await this.sendSigned('join', data, peerId);
   }
 
@@ -1314,7 +1633,7 @@ export class RoomClient {
       this.send('join-deny', { reason: 'peer-mismatch' }, peerId);
       return;
     }
-    if (this.members.size + 2 > this.meta.limit) {
+    if (this.memberCount + 1 > this.meta.limit) {
       this.send('join-deny', { reason: 'room-full' }, peerId);
       return;
     }
@@ -1330,6 +1649,15 @@ export class RoomClient {
       this.send('join-deny', { reason: 'nonce-expired' }, peerId);
       return;
     }
+    if (this.password && data.pwHash !== this.passwordHashValue) {
+      this.send('join-deny', { reason: 'wrong-password' }, peerId);
+      return;
+    }
+    if (await this.isBanned(peer.userId)) {
+      // Бан-лист локальный (§4.2, этап 6): хост не пускает забаненного.
+      this.send('join-deny', { reason: 'banned' }, peerId);
+      return;
+    }
     const profile = validProfile(data.profile);
     if (!profile) {
       this.send('join-deny', { reason: 'bad-profile' }, peerId);
@@ -1341,10 +1669,50 @@ export class RoomClient {
       this.emit({ type: 'error', message: 'Отклонён вход: неверная подпись' });
       return;
     }
+    if (this.meta.knock) {
+      // «Стук»: подпись проверена, но вход подтверждает человек в UI хоста.
+      peer.pending = true;
+      const request: JoinRequestInfo = {
+        userId: peer.userId,
+        peerId,
+        name: profile.name,
+        color: profile.color,
+        at: this.now(),
+      };
+      this.pendingJoins.set(peerId, request);
+      this.emit({ type: 'join-request', request });
+      return;
+    }
+    await this.admitJoin(peerId, profile);
+  }
+
+  /**
+   * Принять гостя, прошедшего проверки: добавить в состав, отправить welcome и
+   * разослать обновлённый состав остальным.
+   */
+  private async admitJoin(peerId: string, profile: ProfilePayload): Promise<void> {
+    const peer = this.peers.get(peerId);
+    if (!peer?.userId || peer.joined) {
+      return;
+    }
+    if (this.memberCount + 1 > this.meta.limit) {
+      this.send('join-deny', { reason: 'room-full' }, peerId);
+      return;
+    }
+    if (!peer.localNonce || peer.localNonceUsed) {
+      this.send('join-deny', { reason: 'nonce-replayed' }, peerId);
+      return;
+    }
+    if (!isNonceFresh(this.now(), peer.localNonceAt ?? 0)) {
+      this.send('join-deny', { reason: 'nonce-expired' }, peerId);
+      return;
+    }
     peer.localNonceUsed = true;
     peer.joined = true;
+    peer.pending = false;
     peer.profile = profile;
     peer.joinedAt = this.now();
+    this.pendingJoins.delete(peerId);
     this.members.set(peer.userId, {
       userId: peer.userId,
       peerId,
@@ -1352,12 +1720,11 @@ export class RoomClient {
       color: profile.color,
       avatarHash: profile.avatarHash,
       joinedAt: peer.joinedAt,
-      host: false,
+      host: peer.userId === this.selfUserId,
     });
     this.emitMembers();
-    if (this.hostUserId === null) {
-      this.hostUserId = this.selfUserId;
-    }
+    // Остальные гости видят состав только через welcome: обновляем его.
+    this.broadcastWelcome();
     await this.sendWelcome(peerId);
     // Поздно подключившийся зритель узнаёт о текущей раздаче и возможностях.
     if (this.streamActive && this.screenStream) {
@@ -1376,7 +1743,7 @@ export class RoomClient {
 
   private async sendWelcome(peerId: string): Promise<void> {
     const peer = this.peers.get(peerId);
-    if (!peer || !peer.remoteNonce) {
+    if (!peer || !peer.remoteNonce || !this.selfIsHost) {
       return;
     }
     const data: WelcomeData = {
@@ -1385,26 +1752,29 @@ export class RoomClient {
       room: this.meta,
       members: this.memberList,
       state: this.stateValue,
-      epoch: 1,
+      epoch: this.epochValue,
     };
     await this.sendSigned('welcome', data, peerId);
+  }
+
+  /** Состав изменился: у всех гостей должен обновиться список участников. */
+  private broadcastWelcome(): void {
+    if (!this.selfIsHost) {
+      return;
+    }
+    for (const peer of this.peers.values()) {
+      if (peer.joined) {
+        void this.sendWelcome(peer.peerId);
+      }
+    }
   }
 
   private async handleWelcome(
     envelope: { from: string; d: unknown },
     peerId: string,
   ): Promise<void> {
-    if (this.phaseValue === 'joined') {
-      // Повторный welcome (реплей) не должен сбрасывать уже собранную комнату.
-      return;
-    }
     const hostPeer = this.peers.get(peerId);
-    if (
-      !hostPeer?.pub ||
-      !hostPeer.userId ||
-      hostPeer.userId !== this.hostUserId ||
-      !hostPeer.host
-    ) {
+    if (!hostPeer?.pub || !hostPeer.userId || hostPeer.userId !== this.hostUserId) {
       return;
     }
     const data = envelope.d as Partial<WelcomeData>;
@@ -1430,7 +1800,14 @@ export class RoomClient {
       this.emit({ type: 'error', message: 'Welcome от другой комнаты' });
       return;
     }
-    if (!isValidState(data.state, envelope.from)) {
+    const stateBy = isRecord(data.state)
+      ? typeof (data.state as Record<string, unknown>).by === 'string'
+        ? (data.state as { by: string }).by
+        : ''
+      : '';
+    if (!isValidState(data.state, stateBy)) {
+      // State в welcome может быть authored не хостом: в A/C driver — любой
+      // участник, а welcome подписан хостом и потому доверенный.
       this.emit({ type: 'error', message: 'Welcome с некорректным state' });
       return;
     }
@@ -1440,32 +1817,25 @@ export class RoomClient {
       return;
     }
 
-    this.meta = {
-      ...room,
-      limit: Math.min(ROOM_LIMIT_MAX, Math.max(2, Number(room.limit) || ROOM_LIMIT_DEFAULT)),
-    };
-    this.members.clear();
-    for (const rawMember of data.members) {
-      const member = rawMember as Partial<MemberInfo>;
-      if (
-        typeof member.userId !== 'string' ||
-        typeof member.peerId !== 'string' ||
-        typeof member.name !== 'string' ||
-        typeof member.color !== 'string'
-      ) {
-        continue;
+    // Повторный welcome — это обновление состава после входа/выхода гостя:
+    // состояние и playback не трогаем, иначе можно откатить свежий state.
+    if (this.phaseValue === 'joined') {
+      const epoch = typeof data.epoch === 'number' ? data.epoch : this.epochValue;
+      if (epoch < this.epochValue) {
+        return;
       }
-      this.members.set(member.userId, {
-        userId: member.userId,
-        peerId: member.peerId,
-        name: member.name,
-        color: member.color,
-        avatarHash:
-          typeof member.avatarHash === 'string' ? member.avatarHash : undefined,
-        joinedAt: typeof member.joinedAt === 'number' ? member.joinedAt : this.now(),
-        host: member.host === true,
-      });
+      this.epochValue = epoch;
+      this.applyRoomMeta(room);
+      this.applyMembers(data.members);
+      this.emitMembers();
+      this.emit({ type: 'meta', meta: this.meta });
+      return;
     }
+
+    this.epochValue =
+      typeof data.epoch === 'number' && data.epoch > 0 ? data.epoch : this.epochValue;
+    this.applyRoomMeta(room);
+    this.applyMembers(data.members);
     hostPeer.joined = true;
     this.stateValue = data.state;
     this.version = { seq: data.state.seq, by: data.state.by };
@@ -1493,6 +1863,53 @@ export class RoomClient {
     this.emitDebug();
   }
 
+  private applyRoomMeta(room: RoomMeta): void {
+    this.meta = {
+      code: this.code,
+      title: normalizeRoomTitle(room.title, this.code),
+      mode: room.mode,
+      limit: Math.min(
+        ROOM_LIMIT_MAX,
+        Math.max(ROOM_LIMIT_MIN, Number(room.limit) || ROOM_LIMIT_DEFAULT),
+      ),
+      closed: room.closed === true,
+      knock: room.knock === true,
+    };
+  }
+
+  private applyMembers(rawMembers: unknown[]): void {
+    this.members.clear();
+    for (const rawMember of rawMembers) {
+      const member = rawMember as Partial<MemberInfo>;
+      if (
+        typeof member.userId !== 'string' ||
+        typeof member.peerId !== 'string' ||
+        typeof member.name !== 'string' ||
+        typeof member.color !== 'string' ||
+        member.userId === this.selfUserId
+      ) {
+        continue;
+      }
+      this.members.set(member.userId, {
+        userId: member.userId,
+        peerId: member.peerId,
+        name: member.name,
+        color: member.color,
+        avatarHash:
+          typeof member.avatarHash === 'string' ? member.avatarHash : undefined,
+        joinedAt: typeof member.joinedAt === 'number' ? member.joinedAt : this.now(),
+        host: member.host === true,
+      });
+      // Хост поручился за состав: гости могут принимать сообщения друг друга
+      // (mesh), не повторяя join на каждую пару (§4.2, этап 6).
+      const peer = this.peers.get(member.peerId);
+      if (peer) {
+        peer.joined = true;
+        peer.userId = member.userId;
+      }
+    }
+  }
+
   private handleJoinDeny(envelope: { d: unknown }): void {
     const data = envelope.d as { reason?: unknown };
     const reason = typeof data.reason === 'string' ? data.reason : 'unknown';
@@ -1505,6 +1922,9 @@ export class RoomClient {
       'peer-mismatch': 'Ошибка канала: peerId не совпадает',
       'bad-profile': 'Хост отклонил профиль',
       'no-hello': 'Хост не получил hello',
+      'wrong-password': 'Неверный пароль комнаты',
+      banned: 'Хост заблокировал вход в эту комнату с вашего устройства',
+      'knock-denied': 'Хост отклонил ваш запрос на вход',
     };
     this.setPhase('error');
     this.emit({ type: 'error', message: messages[reason] ?? `Хост отклонил вход: ${reason}` });
@@ -1579,7 +1999,7 @@ export class RoomClient {
   }
 
   private handleSiteUrl(envelope: { from: string; d: unknown }): void {
-    if (this.role === 'host' || envelope.from !== this.hostUserId) {
+    if (this.selfIsHost || envelope.from !== this.hostUserId) {
       return;
     }
     const data = envelope.d as { url?: unknown };
@@ -1595,7 +2015,7 @@ export class RoomClient {
 
   private handleStreamStart(envelope: { from: string; d: unknown }): void {
     if (
-      this.role !== 'guest' ||
+      this.selfIsHost ||
       this.meta.mode !== 'stream' ||
       envelope.from !== this.hostUserId ||
       !isStreamStartData(envelope.d)
@@ -1609,24 +2029,262 @@ export class RoomClient {
   private handleBye(envelope: { from: string; d: unknown }, peer: PeerAuth): void {
     const data = envelope.d as { reason?: unknown };
     const reason = typeof data.reason === 'string' ? data.reason : 'left';
+    const wasHost = peer.userId !== undefined && peer.userId === this.hostUserId;
     if (peer.userId) {
       this.members.delete(peer.userId);
     }
     this.peers.delete(peer.peerId);
+    this.pendingScreens.delete(peer.peerId);
     this.emitMembers();
     this.emit({ type: 'peer-left', peerId: peer.peerId, userId: peer.userId });
-    if (
-      this.role === 'guest' &&
-      peer.userId === this.hostUserId &&
-      (reason === 'host-left' || reason === 'closed')
-    ) {
-      this.stopped = true;
-      this.clearTimers();
-      this.disposeChannel();
-      this.setPhase('closed');
-      this.emit({ type: 'closed', reason });
-      this.emit({ type: 'error', message: 'Хост закрыл комнату' });
+    if (!wasHost) {
+      return;
     }
+    if (reason === 'closed') {
+      this.finish('closed');
+      this.emit({ type: 'error', message: 'Хост закрыл комнату' });
+      return;
+    }
+    if (reason === 'host-left' || reason === 'left') {
+      // Режим B: поток шёл с телефона хоста — миграции нет (§4.5).
+      if (this.meta.mode === 'stream') {
+        this.finish('host-left');
+        this.emit({ type: 'error', message: 'Хост закрыл комнату' });
+        return;
+      }
+      this.migrateHost();
+    }
+  }
+
+  /**
+   * Хост ушёл, режим A/C: выбираем преемника детерминированно (минимальный
+   * userId среди оставшихся), преемник объявляет host-claim с новой эпохой.
+   */
+  private migrateHost(): void {
+    // Только состав, подтверждённый хостом: случайный пир в сигналинге не
+    // должен выиграть выборы. Недостающие члены приходят в welcome-обновлении.
+    const candidates: MemberInfo[] = [
+      ...this.members.values(),
+      {
+        userId: this.selfUserId,
+        peerId: this.selfPeerId,
+        name: this.profile.name,
+        color: this.profile.color,
+        joinedAt: this.selfJoinedAt,
+        host: false,
+      },
+    ];
+    const unique = candidates.filter(
+      (member, index, list) =>
+        list.findIndex((item) => item.userId === member.userId) === index,
+    );
+    const successor = pickSuccessor(unique);
+    if (!successor) {
+      // Остались только мы и ушёл хост — комната закрывается.
+      this.finish('host-left');
+      return;
+    }
+    this.epochValue += 1;
+    this.hostUserId = successor;
+    if (successor === this.selfUserId) {
+      this.becomeHost();
+      return;
+    }
+    this.emit({
+      type: 'host-changed',
+      hostUserId: successor,
+      epoch: this.epochValue,
+      self: false,
+    });
+    this.emitDebug();
+  }
+
+  /** Стать хостом после миграции: собрать состав из mesh и объявить эпоху. */
+  private becomeHost(): void {
+    const previousMembers = [...this.members.values()];
+    this.members.clear();
+    for (const member of previousMembers) {
+      if (member.userId !== this.selfUserId) {
+        this.members.set(member.userId, { ...member, host: false });
+      }
+    }
+    this.hostUserId = this.selfUserId;
+    this.emitMembers();
+    this.emit({
+      type: 'host-changed',
+      hostUserId: this.selfUserId,
+      epoch: this.epochValue,
+      self: true,
+    });
+    const claim: HostClaimPayload = { epoch: this.epochValue };
+    this.send('host-claim', claim);
+    // Новый хост сразу рассылает состав: у гостей он мог устареть.
+    this.broadcastWelcome();
+    this.setPhase('joined');
+    this.emitDebug();
+  }
+
+  private async handleRoomMeta(
+    envelope: { from: string; d: unknown },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (envelope.from !== this.hostUserId || !peer.pub) {
+      return;
+    }
+    if (!isRoomMetaPayload(envelope.d)) {
+      return;
+    }
+    const verified = await verifyEnvelope(envelope as Envelope, peer.pub);
+    if (!verified) {
+      return;
+    }
+    const patch = envelope.d;
+    const next: RoomMeta = {
+      ...this.meta,
+      title:
+        patch.title !== undefined
+          ? normalizeRoomTitle(patch.title, this.code)
+          : this.meta.title,
+      limit:
+        patch.limit !== undefined
+          ? normalizeRoomLimit(patch.limit, this.meta.mode)
+          : this.meta.limit,
+      closed: patch.closed ?? this.meta.closed,
+      knock: patch.knock ?? this.meta.knock,
+    };
+    this.meta = next;
+    this.emit({ type: 'meta', meta: this.meta });
+    this.emitMembers();
+  }
+
+  private handleMuteRequest(envelope: { from: string; d: unknown }): void {
+    if (!isMuteRequestPayload(envelope.d)) {
+      return;
+    }
+    if (envelope.from !== this.hostUserId || envelope.d.target !== this.selfUserId) {
+      return;
+    }
+    const host = this.memberList.find((member) => member.userId === this.hostUserId);
+    this.emit({
+      type: 'mute-request',
+      by: envelope.from,
+      name: host?.name ?? 'Хост',
+    });
+  }
+
+  private async handleModeration(
+    envelope: { t: string; from: string; d: unknown },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (envelope.from !== this.hostUserId || !peer.pub || !isKickPayload(envelope.d)) {
+      return;
+    }
+    const verified = await verifyEnvelope(envelope as Envelope, peer.pub);
+    if (!verified) {
+      return;
+    }
+    const target = envelope.d.target;
+    if (target === this.selfUserId) {
+      const reason: 'kicked' | 'banned' = envelope.t === 'ban' ? 'banned' : 'kicked';
+      this.emit({
+        type: 'kicked',
+        reason,
+        by: envelope.from,
+        until: envelope.d.until,
+      });
+      this.finish(reason);
+      return;
+    }
+    const member = this.members.get(target);
+    if (member) {
+      this.members.delete(target);
+      const peerId = member.peerId;
+      this.peers.delete(peerId);
+      this.emitMembers();
+      this.emit({ type: 'peer-left', peerId, userId: target });
+    }
+  }
+
+  private async handleHostTransfer(
+    envelope: { from: string; d: unknown },
+    peerId: string,
+  ): Promise<void> {
+    if (!isHostTransferPayload(envelope.d)) {
+      return;
+    }
+    const hostPeer = this.peers.get(peerId);
+    if (
+      !hostPeer?.pub ||
+      envelope.from !== this.hostUserId ||
+      envelope.from === envelope.d.target ||
+      envelope.d.epoch <= this.epochValue
+    ) {
+      return;
+    }
+    const verified = await verifyEnvelope(envelope as Envelope, hostPeer.pub);
+    if (!verified) {
+      return;
+    }
+    const target = envelope.d.target;
+    const known =
+      target === this.selfUserId || this.members.has(target) || this.peersHasUser(target);
+    if (!known) {
+      return;
+    }
+    this.epochValue = envelope.d.epoch;
+    this.hostUserId = target;
+    if (target === this.selfUserId) {
+      this.becomeHost();
+      return;
+    }
+    this.emit({
+      type: 'host-changed',
+      hostUserId: target,
+      epoch: this.epochValue,
+      self: false,
+    });
+    this.emitDebug();
+  }
+
+  private handleHostClaim(envelope: { from: string; d: unknown }): void {
+    if (!isHostClaimPayload(envelope.d)) {
+      return;
+    }
+    if (envelope.from !== this.hostUserId) {
+      return;
+    }
+    if (envelope.d.epoch < this.epochValue) {
+      return;
+    }
+    this.epochValue = envelope.d.epoch;
+    this.emitDebug();
+  }
+
+  private peersHasUser(userId: string): boolean {
+    for (const peer of this.peers.values()) {
+      if (peer.userId === userId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Завершить комнату локально (закрыта, кик, бан, уход хоста). */
+  private finish(reason: string): void {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    this.clearTimers();
+    this.images.dispose();
+    this.screenStream = null;
+    this.streamActive = false;
+    this.streamInfo = null;
+    this.pendingScreens.clear();
+    this.pendingJoins.clear();
+    this.disposeChannel();
+    this.setPhase('closed');
+    this.emit({ type: 'closed', reason });
   }
 
   private applyCorrection(): void {

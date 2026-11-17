@@ -11,7 +11,24 @@ export const APP_ID = 'heliwatch-v1';
 
 export const ROOM_CODE_LENGTH = 6;
 export const ROOM_LIMIT_DEFAULT = 4;
+export const ROOM_LIMIT_MIN = 2;
 export const ROOM_LIMIT_MAX = 6;
+/** Название комнаты в карточке лобби (§4.8, этап 6). */
+export const ROOM_TITLE_MAX = 48;
+/** Пароль комнаты — ключ сигналинга и то, что хост проверяет в join (§4.2). */
+export const ROOM_PASSWORD_MIN = 4;
+export const ROOM_PASSWORD_MAX = 64;
+
+/** Лобби — отдельная trystero-комната, карточки открытых комнат (§4.8). */
+export const LOBBY_ROOM_ID = 'heliwatch-lobby-v1';
+/** Карточка живёт 70 секунд без announce (TTL), announce — раз в 25 ± 5 с. */
+export const LOBBY_CARD_TTL_MS = 70_000;
+export const LOBBY_ANNOUNCE_MS = 25_000;
+export const LOBBY_ANNOUNCE_JITTER_MS = 5_000;
+/** Антиспам: не чаще одной публикации карточки в 5 секунд на хост. */
+export const LOBBY_PUBLISH_MIN_GAP_MS = 5_000;
+/** Ответ хоста на lobby-probe — не чаще раза в секунду. */
+export const LOBBY_PROBE_MIN_GAP_MS = 1_000;
 
 /** Стрим файла хоста (§4.1, этап 5): 1–2 зрителя, всего до 3 участников. */
 export const STREAM_MAX_VIEWERS = 2;
@@ -132,6 +149,323 @@ export interface JoinData {
   peerId: string;
   profile: ProfilePayload;
   ver: number;
+  /**
+   * SHA-256 пароля комнаты (§4.2, этап 6). Пароль дополнительно входит в
+   * идентификатор сигналинга, поэтому без него гость не найдёт хост вообще.
+   */
+  pwHash?: string;
+}
+
+/** Хост меняет карточку комнаты; сообщение подписывается (§4.3). */
+export interface RoomMetaPayload {
+  title?: string;
+  limit?: number;
+  closed?: boolean;
+  knock?: boolean;
+}
+
+/** `kick`/`ban` (§4.3, этап 6): цель, причина и срок для бана. */
+export interface KickPayload {
+  target: string;
+  reason?: string;
+  /** Для бана: timestamp окончания; отсутствует — навсегда. */
+  until?: number;
+}
+
+/** `mute-request`: хост просит участника выключить микрофон. */
+export interface MuteRequestPayload {
+  target: string;
+}
+
+/** `host-transfer`: подписанное назначение нового хоста. */
+export interface HostTransferPayload {
+  target: string;
+  epoch: number;
+}
+
+/** `host-claim`: новый хост объявляет эпоху (в том числе после ухода хоста). */
+export interface HostClaimPayload {
+  epoch: number;
+}
+
+/** `join-accept` / `join-deny` (§4.2): ответ хоста на «стук». */
+export interface JoinDecisionPayload {
+  reason?: string;
+}
+
+/**
+ * Карточка комнаты в лобби (§4.8). Закрытая комната (`closed`) в лобби не
+ * публикуется вовсе — она открывается только по коду.
+ */
+export interface LobbyCard {
+  code: string;
+  title: string;
+  mode: RoomMode;
+  closed: boolean;
+  limit: number;
+  count: number;
+  hasPassword: boolean;
+  /** Комната пускает только после подтверждения хостом («стук»). */
+  knock?: boolean;
+  hostUserId: string;
+  updatedAt: number;
+}
+
+/** `lobby-announce` / `lobby-update` / `lobby-remove` несут одну карточку. */
+export interface LobbyCardPayload {
+  card: LobbyCard;
+}
+
+/**
+ * Пароль как ключ сигналинга: комната с паролем живёт в trystero-комнате,
+ * производной от кода и пароля. Без пароля гость не найдёт хост в сигналинге,
+ * даже зная код.
+ */
+export async function signalingRoomId(
+  code: string,
+  password?: string | null,
+): Promise<string> {
+  const normalized = normalizePassword(password);
+  if (!normalized) {
+    return code;
+  }
+  const digest = await sha256Base64Url(`heliwatch/sig/v1/${code}\n${normalized}`);
+  return `${code}-${digest.slice(0, 12)}`;
+}
+
+/** Хеш пароля для `join`: привязываем к коду, чтобы хеш нельзя было перенести. */
+export async function passwordHash(code: string, password: string): Promise<string> {
+  return sha256Base64Url(`heliwatch/pw/v1/${code}\n${password}`);
+}
+
+/** Пароль без внешних пробелов; слишком короткий/длинный — не пароль. */
+export function normalizePassword(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length < ROOM_PASSWORD_MIN || trimmed.length > ROOM_PASSWORD_MAX) {
+    return null;
+  }
+  return trimmed;
+}
+
+export async function sha256Base64Url(text: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(text),
+  );
+  const bytes = new Uint8Array(digest);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return globalThis
+    .btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/** Название комнаты: обрезаем пробелы и длину, пустое — дефолт. */
+export function normalizeRoomTitle(raw: string | null | undefined, code: string): string {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) {
+    return `Комната ${code}`;
+  }
+  return trimmed.slice(0, ROOM_TITLE_MAX);
+}
+
+export function normalizeRoomLimit(limit: unknown, mode: RoomMode): number {
+  const fallback = roomLimitForMode(mode);
+  if (mode === 'stream') {
+    // В режиме B лимит жёстко 3: канал мобильного хоста (§4.1).
+    return fallback;
+  }
+  if (typeof limit !== 'number' || !Number.isInteger(limit)) {
+    return fallback;
+  }
+  return Math.min(ROOM_LIMIT_MAX, Math.max(ROOM_LIMIT_MIN, limit));
+}
+
+export function isRoomMetaPayload(value: unknown): value is RoomMetaPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (
+    data.title === undefined &&
+    data.limit === undefined &&
+    data.closed === undefined &&
+    data.knock === undefined
+  ) {
+    return false;
+  }
+  if (
+    data.title !== undefined &&
+    (typeof data.title !== 'string' ||
+      data.title.trim().length === 0 ||
+      data.title.length > ROOM_TITLE_MAX)
+  ) {
+    return false;
+  }
+  if (
+    data.limit !== undefined &&
+    (typeof data.limit !== 'number' ||
+      !Number.isInteger(data.limit) ||
+      data.limit < ROOM_LIMIT_MIN ||
+      data.limit > ROOM_LIMIT_MAX)
+  ) {
+    return false;
+  }
+  if (data.closed !== undefined && typeof data.closed !== 'boolean') {
+    return false;
+  }
+  if (data.knock !== undefined && typeof data.knock !== 'boolean') {
+    return false;
+  }
+  return true;
+}
+
+export function isKickPayload(value: unknown): value is KickPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.target !== 'string' || data.target.length === 0) {
+    return false;
+  }
+  if (data.reason !== undefined && typeof data.reason !== 'string') {
+    return false;
+  }
+  if (data.until !== undefined) {
+    if (typeof data.until !== 'number' || !Number.isFinite(data.until) || data.until < 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isMuteRequestPayload(value: unknown): value is MuteRequestPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).target === 'string' &&
+    ((value as Record<string, unknown>).target as string).length > 0
+  );
+}
+
+export function isHostTransferPayload(value: unknown): value is HostTransferPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.target === 'string' &&
+    data.target.length > 0 &&
+    typeof data.epoch === 'number' &&
+    Number.isInteger(data.epoch) &&
+    data.epoch > 0
+  );
+}
+
+export function isHostClaimPayload(value: unknown): value is HostClaimPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).epoch === 'number' &&
+    Number.isInteger((value as Record<string, unknown>).epoch as number) &&
+    ((value as Record<string, unknown>).epoch as number) > 0
+  );
+}
+
+export function isJoinDecisionPayload(value: unknown): value is JoinDecisionPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  return data.reason === undefined || typeof data.reason === 'string';
+}
+
+export function isLobbyCard(value: unknown): value is LobbyCard {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.code !== 'string' || normalizeRoomCode(data.code) !== data.code) {
+    return false;
+  }
+  if (
+    typeof data.title !== 'string' ||
+    data.title.trim().length === 0 ||
+    data.title.length > ROOM_TITLE_MAX
+  ) {
+    return false;
+  }
+  if (data.mode !== 'site' && data.mode !== 'local' && data.mode !== 'stream') {
+    return false;
+  }
+  if (typeof data.closed !== 'boolean' || typeof data.hasPassword !== 'boolean') {
+    return false;
+  }
+  if (data.knock !== undefined && typeof data.knock !== 'boolean') {
+    return false;
+  }
+  if (
+    typeof data.limit !== 'number' ||
+    !Number.isInteger(data.limit) ||
+    data.limit < ROOM_LIMIT_MIN ||
+    data.limit > ROOM_LIMIT_MAX
+  ) {
+    return false;
+  }
+  if (
+    typeof data.count !== 'number' ||
+    !Number.isInteger(data.count) ||
+    data.count < 1 ||
+    data.count > data.limit
+  ) {
+    return false;
+  }
+  if (
+    typeof data.hostUserId !== 'string' ||
+    data.hostUserId.length === 0 ||
+    data.hostUserId.length > 512
+  ) {
+    return false;
+  }
+  if (
+    typeof data.updatedAt !== 'number' ||
+    !Number.isFinite(data.updatedAt) ||
+    data.updatedAt <= 0
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isLobbyCardPayload(value: unknown): value is LobbyCardPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    isLobbyCard((value as Record<string, unknown>).card)
+  );
+}
+
+/**
+ * Участник для выборов нового хоста после ухода текущего (§4.5, этап 6).
+ * `joinedAt` намеренно не используется: он приходит с часов хоста и у гостей
+ * расходится, поэтому выборы были бы недетерминированными. Порядок по userId
+ * (лексикографически) одинаков у всех участников и не зависит от часов.
+ */
+export function pickSuccessor(
+  members: ReadonlyArray<{ userId: string; host: boolean }>,
+): string | null {
+  const candidates = members
+    .filter((member) => !member.host && member.userId.length > 0)
+    .map((member) => member.userId)
+    .sort();
+  return candidates[0] ?? null;
 }
 
 export interface WelcomeData {

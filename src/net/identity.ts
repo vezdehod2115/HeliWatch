@@ -136,6 +136,42 @@ export async function publicKeyMatchesUserId(
   }
 }
 
+/**
+ * Публичный ключ по userId: userId и есть SPKI DER в base64url. Нужен лобби
+ * (этап 6): карточку подписывает хост, а гости проверяют подпись, не общаясь с
+ * ним напрямую по DataChannel.
+ */
+export async function publicKeyFromUserId(userId: string): Promise<JsonWebKey | null> {
+  try {
+    const der = base64UrlDecode(userId);
+    const key = await globalThis.crypto.subtle.importKey(
+      'spki',
+      der as unknown as BufferSource,
+      ECDSA,
+      true,
+      ['verify'],
+    );
+    return await globalThis.crypto.subtle.exportKey('jwk', key);
+  } catch {
+    return null;
+  }
+}
+
+/** Проверка подписи конверта по одному userId (без hello и обмена ключами). */
+export async function verifyEnvelopeWithUserId(
+  envelope: Envelope,
+  userId: string,
+): Promise<boolean> {
+  const publicJwk = await publicKeyFromUserId(userId);
+  if (!publicJwk) {
+    return false;
+  }
+  if (!(await publicKeyMatchesUserId(publicJwk, userId))) {
+    return false;
+  }
+  return verifyEnvelope(envelope, publicJwk);
+}
+
 /** Подписать конверт. Возвращает base64url(ECDSA P-256, 64 байта). */
 export async function signEnvelope(
   envelope: Envelope,

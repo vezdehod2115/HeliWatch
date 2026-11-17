@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HomeScreen } from '../features/lobby/HomeScreen';
+import { type RoomSetup } from '../features/lobby/types';
 import { RoomScreen } from '../features/room/RoomScreen';
 import { DebugZones } from '../features/site/DebugZones';
 import { useSiteController } from '../features/site/useSiteController';
@@ -13,7 +14,14 @@ import { BrandMark } from './icons';
 
 type Screen =
   | { name: 'home' }
-  | { name: 'room'; code: string; role: RoomRole; mode: RoomMode | null };
+  | {
+      name: 'room';
+      code: string;
+      role: RoomRole;
+      mode: RoomMode | null;
+      setup: RoomSetup | null;
+      password: string | null;
+    };
 
 const TOAST_MS = 3400;
 
@@ -129,20 +137,41 @@ export function Shell() {
   }, [notify]);
 
   const createRoom = useCallback(
-    (mode: RoomMode) => {
+    (setup: RoomSetup) => {
       const code = generateRoomCode();
-      void touchRecentRoom(code, mode).catch(() => undefined);
-      setScreen({ name: 'room', code, role: 'host', mode });
+      void touchRecentRoom(code, setup.mode).catch(() => undefined);
+      setScreen({
+        name: 'room',
+        code,
+        role: 'host',
+        mode: setup.mode,
+        setup,
+        password: setup.password,
+      });
     },
     [],
   );
 
-  const joinRoom = useCallback((code: string) => {
-    setScreen({ name: 'room', code, role: 'guest', mode: null });
+  const joinRoom = useCallback((code: string, password: string | null) => {
+    setScreen({
+      name: 'room',
+      code,
+      role: 'guest',
+      mode: null,
+      setup: null,
+      password,
+    });
   }, []);
 
   const openRecent = useCallback((code: string, mode: RoomMode) => {
-    setScreen({ name: 'room', code, role: 'guest', mode });
+    setScreen({
+      name: 'room',
+      code,
+      role: 'guest',
+      mode,
+      setup: null,
+      password: null,
+    });
   }, []);
 
   const handleJoined = useCallback((code: string, mode: RoomMode) => {
@@ -193,6 +222,8 @@ export function Shell() {
           code={screen.code}
           role={screen.role}
           initialMode={screen.mode}
+          setup={screen.setup}
+          password={screen.password}
           identity={identity}
           profile={profile}
           site={site}

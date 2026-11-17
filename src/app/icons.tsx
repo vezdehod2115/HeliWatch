@@ -21,7 +21,11 @@ export type IconName =
   | 'photo'
   | 'history'
   | 'broadcast'
-  | 'pip';
+  | 'pip'
+  | 'lock'
+  | 'door'
+  | 'crown'
+  | 'settings';
 
 interface IconProps {
   name: IconName;
@@ -206,6 +210,36 @@ export function Icon({ name, size = 20 }: IconProps) {
         <svg {...common}>
           <rect x="3" y="5" width="18" height="14" rx="2.6" />
           <rect x="12" y="11" width="7" height="6" rx="1.2" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'lock':
+      return (
+        <svg {...common}>
+          <rect x="4.5" y="10" width="15" height="10" rx="2.6" />
+          <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
+          <path d="M12 14v2.5" />
+        </svg>
+      );
+    case 'door':
+      return (
+        <svg {...common}>
+          <path d="M4 20h16" />
+          <path d="M6 20V5.5A1.5 1.5 0 0 1 7.5 4h9A1.5 1.5 0 0 1 18 5.5V20" />
+          <circle cx="14.6" cy="12.4" r="1" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'crown':
+      return (
+        <svg {...common}>
+          <path d="M4 17h16l-1.4-9-4.1 3.4L12 6l-2.5 5.4L5.4 8 4 17Z" />
+          <path d="M5 20h14" />
+        </svg>
+      );
+    case 'settings':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18" />
         </svg>
       );
     default:

@@ -5,13 +5,19 @@ import type { RoomPhase } from '../../net/room';
 
 interface RoomBarProps {
   code: string;
+  title: string;
   role: RoomRole;
   mode: RoomMode;
   phase: RoomPhase;
   strategy: string;
   peerCount: number;
   members: MemberInfo[];
+  limit: number;
+  closed: boolean;
+  knock: boolean;
+  pendingCount: number;
   selfUserId: string;
+  hostUserId: string | null;
   driverId: string | null;
   seq: number;
   drift: number | null;
@@ -22,6 +28,8 @@ interface RoomBarProps {
   onCopy: () => void;
   onResync: () => void;
   onToggleZones: () => void;
+  /** Участники и модерация (этап 6). */
+  onOpenMembers: () => void;
   /** Вход в PiP (этап 4): доступен, когда комната открыта. */
   onPip: () => void;
   pipAvailable: boolean;
@@ -46,13 +54,19 @@ function shortId(value: string | null): string {
 /** Компактная шапка комнаты: код, состояние связи, участники и диагностика. */
 export function RoomBar({
   code,
+  title,
   role,
   mode,
   phase,
   strategy,
   peerCount,
   members,
+  limit,
+  closed,
+  knock,
+  pendingCount,
   selfUserId,
+  hostUserId,
   driverId,
   seq,
   drift,
@@ -63,11 +77,13 @@ export function RoomBar({
   onCopy,
   onResync,
   onToggleZones,
+  onOpenMembers,
   onPip,
   pipAvailable,
 }: RoomBarProps) {
   const [debugOpen, setDebugOpen] = useState(false);
   const live = phase === 'joined';
+  const selfIsHost = hostUserId !== null ? hostUserId === selfUserId : role === 'host';
   const driver = driverId === selfUserId ? 'вы' : shortId(driverId);
 
   return (
@@ -95,8 +111,18 @@ export function RoomBar({
         <span className={`hw-dot${live ? ' is-live' : phase === 'error' ? ' is-busy' : ''}`} />
         <span className="hw-roomphase">
           {PHASE_LABELS[phase]}
-          {live && peerCount > 1 ? ` · ${peerCount}` : ''}
+          {live ? ` · ${members.length}/${limit}` : ''}
         </span>
+        <button
+          type="button"
+          className={`hw-iconbtn${pendingCount > 0 ? ' is-active' : ''}`}
+          onClick={onOpenMembers}
+          aria-label="Участники и модерация"
+          title={pendingCount > 0 ? `Стучатся: ${pendingCount}` : 'Участники'}
+        >
+          <Icon name="users" size={18} />
+          {pendingCount > 0 ? <span className="hw-badge-dot" /> : null}
+        </button>
         <button
           type="button"
           className="hw-iconbtn"
@@ -130,6 +156,9 @@ export function RoomBar({
       </div>
 
       <div className="hw-roombar-meta">
+        <span className="hw-roomtitle" title={title}>
+          {title || `Комната ${code}`}
+        </span>
         <span className="hw-modechip">
           {mode === 'site'
             ? 'сайт'
@@ -137,6 +166,16 @@ export function RoomBar({
               ? 'файл хоста'
               : 'локальный файл'}
         </span>
+        {closed ? (
+          <span className="hw-metaflag">
+            <Icon name="lock" size={11} /> закрытая
+          </span>
+        ) : null}
+        {knock ? (
+          <span className="hw-metaflag">
+            <Icon name="door" size={11} /> стук
+          </span>
+        ) : null}
         <span className="hw-strategychip">
           {strategy || '…'}
           {live && peerCount === 0 ? ' · ждём второго' : ''}
@@ -179,7 +218,7 @@ export function RoomBar({
           <span>seq {seq}</span>
           <span>drift {drift === null ? '—' : `${drift.toFixed(2)} с`}</span>
           <span>участников {members.length}</span>
-          <span>{role === 'host' ? 'хост' : 'гость'}</span>
+          <span>{selfIsHost ? 'хост' : 'гость'}</span>
         </div>
       )}
     </header>

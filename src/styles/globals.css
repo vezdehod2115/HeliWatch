@@ -2275,3 +2275,420 @@
 .hw-app--pip .hw-streamplayer-bar {
   display: none;
 }
+
+/* ==================== Этап 6: лобби, пароли, модерация ==================== */
+
+/*
+ * Лобби на главной. Карточка живёт 70 с, поэтому список выглядит как живой
+ * чат: перечисление комнат, а не форма. Вход — крупная кнопка справа.
+ */
+
+.hw-lobby-refresh {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hw-lobby-error {
+  color: var(--color-hw-danger);
+}
+
+.hw-lobby-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hw-lobby-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hw-lobby-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-hw-sm);
+  border: 1px solid rgb(111 240 196 / 0.12);
+  background: rgb(2 18 16 / 0.4);
+}
+
+.hw-lobby-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hw-lobby-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--color-hw-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hw-lobby-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--color-hw-dim);
+}
+
+.hw-lobby-code {
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  color: var(--color-hw-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.hw-lobby-count {
+  color: var(--color-hw-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hw-lobby-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--color-hw-line);
+  color: var(--color-hw-muted);
+  white-space: nowrap;
+}
+
+.hw-lobby-password {
+  padding: 0 2px 2px;
+}
+
+/* ---------- Создание комнаты: название, лимит, пароль и флаги ---------- */
+
+.hw-create-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.hw-create-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-hw-dim);
+}
+
+.hw-create-row:first-child {
+  grid-column: 1 / -1;
+}
+
+.hw-create-row .hw-field {
+  height: 38px;
+  font-size: 13px;
+}
+
+.hw-create-row select.hw-field {
+  appearance: none;
+  text-align: left;
+}
+
+.hw-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hw-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: var(--radius-hw-md);
+  border: 1px solid var(--color-hw-line);
+  background: rgb(2 18 16 / 0.4);
+  color: var(--color-hw-muted);
+  transition:
+    border-color var(--duration-fast) var(--ease-hw),
+    background var(--duration-fast) var(--ease-hw);
+}
+
+.hw-toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hw-toggle strong {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--color-hw-ink);
+}
+
+.hw-toggle small {
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--color-hw-dim);
+}
+
+.hw-toggle.is-on {
+  border-color: var(--color-hw-line-strong);
+  background: var(--color-hw-accent-soft);
+  color: var(--color-hw-accent);
+}
+
+/* ---------- Шапка комнаты: название и флаги ---------- */
+
+.hw-roomtitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--color-hw-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hw-metaflag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--color-hw-line);
+  color: var(--color-hw-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.hw-roombar .hw-iconbtn {
+  position: relative;
+}
+
+.hw-badge-dot {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-hw-warning);
+  box-shadow: 0 0 0 2px #072622;
+}
+
+/* ---------- «Стук»: карточка над комнатой ---------- */
+
+.hw-joinrequests {
+  flex: none;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px calc(var(--hw-safe-right) + 8px) 0 calc(var(--hw-safe-left) + 8px);
+}
+
+.hw-joinrequest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-hw-md);
+  border: 1px solid var(--color-hw-line-strong);
+  background: rgb(7 38 34 / 0.94);
+  box-shadow: var(--shadow-hw-panel);
+}
+
+.hw-joinrequest-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.hw-joinrequest-main strong {
+  font-size: 12.5px;
+  color: var(--color-hw-ink);
+}
+
+.hw-joinrequest-main span {
+  font-size: 10.5px;
+  color: var(--color-hw-dim);
+}
+
+/* ---------- Модалка участников и модерации ---------- */
+
+.hw-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding:
+    calc(var(--hw-safe-top) + 14px)
+    calc(var(--hw-safe-right) + 10px)
+    calc(var(--hw-safe-bottom) + 14px)
+    calc(var(--hw-safe-left) + 10px);
+  background: rgb(1 12 11 / 0.6);
+  pointer-events: auto;
+}
+
+.hw-modal-card {
+  width: min(520px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--radius-hw-xl);
+  border: 1px solid var(--color-hw-line-strong);
+  background: linear-gradient(160deg, #0d322d, #051b19);
+  box-shadow: var(--shadow-hw-panel);
+}
+
+.hw-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-hw-accent);
+}
+
+.hw-modal-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 750;
+  color: var(--color-hw-ink);
+}
+
+.hw-modal-head .hw-iconbtn {
+  margin-left: auto;
+}
+
+.hw-moderation-count {
+  font-size: 11px;
+  color: var(--color-hw-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.hw-moderation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hw-moderation-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-hw-sm);
+  background: rgb(2 18 16 / 0.5);
+  border: 1px solid rgb(111 240 196 / 0.1);
+}
+
+.hw-moderation-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hw-moderation-name strong {
+  font-size: 12.5px;
+  color: var(--color-hw-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hw-moderation-flags {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.hw-moderation-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.hw-moderation-actions .hw-iconbtn {
+  width: 34px;
+  height: 34px;
+}
+
+.hw-iconbtn.is-danger {
+  color: var(--color-hw-danger);
+}
+
+.hw-ghost.is-danger {
+  color: var(--color-hw-danger);
+  border-color: rgb(255 132 148 / 0.35);
+}
+
+.hw-banrow {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 2px 2px;
+  font-size: 11px;
+  color: var(--color-hw-muted);
+}
+
+.hw-banrow .hw-ghost {
+  height: 32px;
+  font-size: 11.5px;
+}
+
+.hw-moderation-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-hw-line);
+}
+
+.hw-moderation-settings h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-hw-accent);
+}
+
+.hw-close-room {
+  align-self: flex-start;
+  height: 38px;
+}
+
+/* Ландшафт: модалка не растягивается на всю высоту. */
+@media (min-width: 900px) {
+  .hw-modal {
+    align-items: center;
+  }
+}

@@ -10,7 +10,7 @@ import type {
   RoomMode,
   RoomRole,
 } from '../net/protocol';
-import type { RoomPhase } from '../net/room';
+import type { JoinRequestInfo, RoomPhase } from '../net/room';
 
 export interface RoomSnapshot {
   phase: RoomPhase;
@@ -32,6 +32,15 @@ export interface RoomSnapshot {
   drift: number | null;
   /** Текущий driver (по последнему state). */
   driverId: string | null;
+  /** Настройки комнаты из welcome/room-meta (этап 6). */
+  title: string;
+  limit: number;
+  closed: boolean;
+  knock: boolean;
+  /** Эпоха хоста: меняется при передаче и миграции. */
+  epoch: number;
+  /** «Стуки» — у хоста, пока он не принял решение. */
+  joinRequests: JoinRequestInfo[];
 }
 
 export interface RoomStore extends RoomSnapshot {
@@ -56,6 +65,12 @@ const initial: RoomSnapshot = {
   peerCount: 0,
   drift: null,
   driverId: null,
+  title: '',
+  limit: 4,
+  closed: false,
+  knock: false,
+  epoch: 1,
+  joinRequests: [],
 };
 
 export const useRoomStore = create<RoomStore>((set) => ({
