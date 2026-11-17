@@ -60,6 +60,7 @@ export function ImageViewer({ url, onClose }: ImageViewerProps) {
     <div
       className="hw-imageviewer"
       data-hw-region="imageviewer"
+      data-hw-block
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}

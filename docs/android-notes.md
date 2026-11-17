@@ -18,7 +18,7 @@ pnpm android:doctor       # проверяет, что ничего не пот�
 |---|---|
 | `app/build.gradle.kts` | `compileSdk = 36`, `targetSdk = 36`, `minSdk = 26` |
 | `app/src/main/AndroidManifest.xml` | маркер `HW:PATCH:ACTIVITY`, `configChanges` + `density`, `windowSoftInputMode=adjustResize`, `resizeableActivity=true`, `supportsPictureInPicture=true` (этап 4), deep link `heliwatch://` (`HW:PATCH:DEEPLINK`) |
-| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` и `onNewIntent → handleIntent` между маркерами `HW:PATCH:MAIN` / `HW:PATCH:INTENT`, прокси `onUserLeaveHint` и `onPictureInPictureModeChanged` между маркерами `HW:PATCH:PIP` |
+| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` и `onNewIntent → handleIntent` между маркерами `HW:PATCH:MAIN` / `HW:PATCH:INTENT`, прокси `onUserLeaveHint` и `onPictureInPictureModeChanged` между маркерами `HW:PATCH:PIP`, `onPause`/`onStop` после `super` между маркерами `HW:PATCH:LIFECYCLE` (этап 8, иначе WebView остаётся на паузе) |
 | `app/src/main/res/values/strings.xml` | `app_name` и `main_activity_title` = «HeliWatch» |
 | `app/src/main/res/values*/themes.xml` | `Theme.Material3.Dark.NoActionBar`, тёмный `windowBackground`, прозрачные системные бары |
 | `app/src/main/res/values/hw_branding.xml` | цвета окна и иконки |
@@ -110,6 +110,64 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
 5. `TimerGuard` после `super.onPause()`/`super.onStop()` будит оба WebView
    (`onResume` + `resumeTimers`) — `setInterval`, DataChannel и голос живут в
    фоне. Проверка — счётчик времени в PiP-полосе.
+
+### Этап 8: почему PiP замирал и как это исправлено
+
+`WryActivity.onPause()` вызывает `Rust.onPause()` (а тот — наш плагин), и только
+**после** этого — `mWebView.onPause()` у Tauri-WebView. Поэтому `TimerGuard`
+внутри `onPause` будил WebView, которого через мгновение снова усыпляли: React
+замирал, PiP показывал стоп-кадр, а при возврате приложение «висело» на очереди
+событий. Теперь `MainActivity.onPause/onStop` после `super` зовут
+`HeliWatchBridge.onActivityPauseAfterSuper()/onActivityStopAfterSuper()`, и оба
+WebView действительно остаются живыми.
+
+Второй баг — команды Tauri приходят из JNI-потока. `setPictureInPictureParams`
+и `enterPictureInPictureMode` можно звать только из main, иначе они молча не
+применялись (автовход «свайпом» не включался). `PiPController` маршалит вызовы
+через `Looper`/`runOnUiThread`, а `pip_enter` ждёт результат через `CountDownLatch`.
+
+В PiP режима «Сайт» React-слой скрывается (`HeliWatchContainer.setPipMode(...,
+keepReact = false)`): видео рисует нативный WebView, второй полноэкранный слой
+только нагружает композитор. `page-hook` в PiP не снимает кадр акцента, не
+крутит `MutationObserver` и раз в 2.5 с пересканирует `<video>`; зоны касания в
+React не отправляются (`setRegionSyncPaused`).
+
+**Выбор фото в чате** больше не ставит видео на паузу: пока комната активна,
+сайт не усыпляется на `onPause`; для локального файла WebView будится после
+`super.onPause()`, а если система всё же остановила `<video>`, Kotlin шлёт
+`resume-playback`, и React повторяет play. Системный пикер Tauri-WebView (фото в
+чате) мы не перехватываем — флаг `fileChooserOpen` относится к пикеру сайта; для
+пикера React срабатывает общий механизм возврата.
+
+### Видео-окно комнаты (этап 8)
+
+Адресной строки в комнате нет. `RoomScreen` измеряет прямоугольник
+`VideoWindow` и шлёт `site_cmd {cmd:'setWindow', on, x, y, w, h, radius}`;
+`site-hook.js` добавляет `html.hw-framed`:
+
+```css
+html.hw-framed body > * { visibility: hidden !important; }
+html.hw-framed body video { visibility: visible !important; position: fixed !important;
+  left: var(--hw-vx); top: var(--hw-vy); width: var(--hw-vw); height: var(--hw-vh) }
+```
+
+Предки видео получают класс `hw-frame-plain`, который сбрасывает
+`transform`/`filter`/`contain` (иначе `fixed` прилипает к контейнеру плеера).
+Координаты переводятся из CSS-пикселей экрана в layout viewport по
+`visualViewport` — для страниц, отрисованных в десктопном layout. При навигации
+`hook-ready` заставляет React прислать прямоугольник заново. В режиме поиска
+(`setWindow off`) страница показывается целиком; выбор ролика возвращает
+`browse = false`, и окно снова позиционирует видео. Тот же механизм использует
+PiP: кадр разворачивается на весь экран.
+
+### Зоны касания и модалки (этап 8)
+
+`regions.ts` держит `MutationObserver` на `body` и заново подписывает
+`ResizeObserver` на новые `[data-hw-region]`: без этого зона модалки появлялась
+только со следующим heartbeat, и первый тап уходил сайту. Модалки помечены
+`data-hw-block` — `snapshotRegions` включает `blocking`, и тап вне React-зон
+гасится, а не проваливается в site-WebView. `MAX_REGIONS` поднят до 32,
+дебаунс — 60 мс, heartbeat — 900 мс.
 
 Диагностика:
 
@@ -267,10 +325,10 @@ dependencies {
 | Плагин не компилируется в Gradle | `tauri.settings.gradle`/`tauri.build.gradle.kts` не сгенерированы: пересоберите через CLI (не через Android Studio в первый раз). |
 | Белая вспышка при старте | Тема и `windowBackground` перетёрты — повторите `pnpm android:patch`. |
 | Сайт не виден под React | Проверьте `setBackgroundColor(TRANSPARENT)` у Tauri-WebView и `transparent: true` в `tauri.conf.json`; на некоторых прошивках включите запасной split-режим (этап 4). |
-| Тапы по панели уходят на сайт | Откройте «Отладка → зоны касания» (иконка жука): красные рамки — то, что реально пришло в Kotlin. Проверьте dpr и пересчёт после анимации. |
+| Тапы по панели уходят на сайт | Откройте «Отладка → зоны касания» (иконка жука): красные рамки — то, что реально пришло в Kotlin. Проверьте dpr и пересчёт после анимации. С 0.8.0 новые панели ловит `MutationObserver`, у модалок есть `data-hw-block` (тапы вне зон гасятся, а не уходят сайту). |
 | Клавиатура скрывает панель | В манифесте должен быть `windowSoftInputMode="adjustResize"`; React пересылает зоны на `visualViewport.resize`. |
 | Back закрывает приложение с первого раза | Не применён `HeliWatchBridge.install(this)`; `pnpm android:doctor` покажет. |
-| PiP не открывается по «домой» | Проверить `supportsPictureInPicture=true` (маркер `HW:PATCH:ACTIVITY`), маркеры `HW:PATCH:PIP` в MainActivity и что комната активна. На Android 11 и ниже вход делает `onUserLeaveHint` — без маркера PIP его нет. |
+| PiP не открывается по «домой» | Проверить `supportsPictureInPicture=true` (маркер `HW:PATCH:ACTIVITY`), маркеры `HW:PATCH:PIP` и `HW:PATCH:LIFECYCLE` в MainActivity, что комната активна и `pipEnabled` включён. С 0.8.0 параметры PiP ставятся из UI-потока: если `setAutoEnterEnabled` вызывался из JNI-потока, автовход молча не включался. На Android 11 и ниже вход делает `onUserLeaveHint`. |
 | «SecurityException» при старте сервиса | На Android 14+ тип `microphone` нельзя объявлять без выданного RECORD_AUDIO и активного микрофона: сервис стартует с `mediaPlayback`, микрофон добавляется вторым `startForeground`. Смотрите logcat `HeliWatch`. |
 | Нет кнопок в уведомлении | Android 13+: не выдано POST_NOTIFICATIONS. Сервис при этом работает; разрешение запрашивается при входе в комнату. |
 | В PiP чёрный экран вместо видео | Сайт не отдал кадр (DRM/аппаратный декодер) — PiP показывает поверхность WebView, а не отдельный плеер. Проверьте тот же сайт в обычном режиме; ограничение описано в README. |

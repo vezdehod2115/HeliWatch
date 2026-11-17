@@ -52,6 +52,16 @@ object HeliWatchBridge {
   private var backCallback: OnBackPressedCallback? = null
   private var backArmedUntil = 0L
   private var backCaptured = false
+
+  /**
+   * Системный пикер файла/фото открыт. Activity уходит в onPause, но комнату и
+   * видео это останавливать не должно: пользователь лишь выбирает картинку в чате.
+   */
+  private var fileChooserOpen = false
+
+  /** Пауза из-за фона/PiP: после возврата надо самим возобновить воспроизведение. */
+  private var pausedByBackground = false
+  private var playingBeforePause = false
   private val deepLinkPattern = Regex("""heliwatch://(?:r/)?([0-9A-Za-z]{6})""", RegexOption.IGNORE_CASE)
   /** Этап 7: приглашение в друзья `heliwatch://f/<userId>` (base64url ключа). */
   private val friendLinkPattern = Regex("""heliwatch://f/([A-Za-z0-9_-]{60,200})""", RegexOption.IGNORE_CASE)
@@ -289,6 +299,9 @@ object HeliWatchBridge {
   ): Boolean {
     val launcher = fileLauncher ?: return false
     cancelPendingFileChooser()
+    // Пикер — не уход из комнаты: помечаем onPause как «выбор фото/файла»,
+    // чтобы не усыплять сайт и не терять воспроизведение.
+    fileChooserOpen = true
     pendingFileCallback = callback
     val intent = try {
       params.createIntent()
@@ -298,6 +311,7 @@ object HeliWatchBridge {
     }
     if (intent == null) {
       pendingFileCallback = null
+      fileChooserOpen = false
       return false
     }
     return try {
@@ -305,6 +319,7 @@ object HeliWatchBridge {
       true
     } catch (error: Exception) {
       pendingFileCallback = null
+      fileChooserOpen = false
       emitError("Не удалось открыть выбор файла: ${error.message}")
       false
     }
@@ -313,6 +328,7 @@ object HeliWatchBridge {
   fun onFileChooserResult(resultCode: Int, data: Intent?) {
     val callback = pendingFileCallback
     pendingFileCallback = null
+    fileChooserOpen = false
     if (callback == null) {
       return
     }
@@ -342,23 +358,63 @@ object HeliWatchBridge {
   }
 
   fun onActivityPause() {
-    siteRef?.onPause()
     TimerGuard.setForeground(false)
-    // WryActivity.onPause() уже вызвал Tauri-WebView.onPause(); в PiP и в фоне
-    // комната должна продолжать жить — будим оба WebView и таймеры процесса.
+    // Запоминаем «играло ли» для возврата: системный пикер фото/файла и PiP
+    // могут поставить <video> на паузу, а пользователь этого не просил.
+    playingBeforePause = SessionState.playing
+    pausedByBackground = true
+    // Пока комната активна, сайт не усыпляем: видео должно играть в PiP, в фоне
+    // и во время выбора фото в чате (системный пикер ставит Activity на паузу).
+    if (!SessionState.roomActive) {
+      siteRef?.onPause()
+    }
+    if (!fileChooserOpen) {
+      runCatching { CookieManager.getInstance().flush() }
+      // Этап 7: парная комната друзей закрывается, когда приложение ушло в фон.
+      emitEvent(JSObject().apply {
+        put("t", "app-state")
+        put("active", false)
+      })
+    }
+    // Выбор фото в чате: WebView и видео остаются живыми, app-state не шлём,
+    // иначе React закрыл бы личные каналы и счёл это уходом из комнаты.
     TimerGuard.keepAlive()
-    runCatching { CookieManager.getInstance().flush() }
-    // Этап 7: парная комната друзей закрывается, когда приложение ушло в фон.
-    emitEvent(JSObject().apply {
-      put("t", "app-state")
-      put("active", false)
-    })
+  }
+
+  /**
+   * WryActivity.onPause() ставит Tauri-WebView на паузу уже ПОСЛЕ вызова плагина,
+   * поэтому будим WebView ещё раз, когда Activity действительно остановилась.
+   * Без этого React-слой замирает в PiP: окно показывает стоп-кадр, а вернувшись
+   * в приложение пользователь видит «зависание» и лаги от накопившихся событий.
+   */
+  fun onActivityPauseAfterSuper() {
+    if (SessionState.roomActive) {
+      TimerGuard.keepAlive()
+      // Сайт тоже мог быть усыплён системой (Chromium останавливает таймеры).
+      runCatching { siteRef?.resumeTimers() }
+    }
+  }
+
+  fun onActivityStopAfterSuper() {
+    if (SessionState.roomActive) {
+      TimerGuard.keepAlive()
+    }
   }
 
   fun onActivityResume() {
     TimerGuard.setForeground(true)
     siteRef?.onResume()
     pipRef?.apply()
+    if (pausedByBackground) {
+      pausedByBackground = false
+      // Пока Activity была на паузе, WebView мог сам поставить видео на паузу.
+      // Возвращаем воспроизведение, если до ухода оно шло (PiP/фон/пикер).
+      if (playingBeforePause && !SessionState.playing) {
+        emitEvent(JSObject().apply {
+          put("t", "resume-playback")
+        })
+      }
+    }
     emitEvent(JSObject().apply {
       put("t", "app-state")
       put("active", true)
@@ -401,7 +457,10 @@ object HeliWatchBridge {
   }
 
   private fun onPipModeChanged(inPip: Boolean) {
-    containerRef?.setPipMode(inPip)
+    // В режиме «Сайт» видео рисует нативный WebView: React-слой с панелями в
+    // маленьком окне не нужен и только нагружает композитор. В режимах файла
+    // и эфира видео живёт в React — его прятать нельзя.
+    containerRef?.setPipMode(inPip, keepReact = SessionState.mode != "site")
     setSitePipClass(inPip)
     if (inPip) {
       // PiP-окно живёт поверх других приложений: таймеры и видео не усыпляем.
@@ -589,6 +648,7 @@ object HeliWatchBridge {
   private fun cancelPendingFileChooser() {
     pendingFileCallback?.onReceiveValue(null)
     pendingFileCallback = null
+    fileChooserOpen = false
   }
 
   private fun injectHook(webView: WebView) {

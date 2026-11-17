@@ -1,3 +1,4 @@
+import { useState, type CSSProperties } from 'react';
 import { Icon } from '../../app/icons';
 import { formatTime, type PlaybackView } from '../../app/playback';
 
@@ -9,6 +10,8 @@ interface BottomBarProps {
   onToggleCollapsed: () => void;
   onTogglePlay: () => void;
   onSeek: (seconds: number) => void;
+  /** Перемотка ползунком: значение в секундах. */
+  onSeekTo: (seconds: number) => void;
   onRate: (rate: number) => void;
   onReload?: () => void;
   /** «Синхронизировать ко мне»: взять управление и разослать своё время. */
@@ -21,7 +24,7 @@ interface BottomBarProps {
 
 const RATES = [0.75, 1, 1.25, 1.5] as const;
 
-/** Нижняя панель: транспорт, скорость и синхронизация комнаты. */
+/** Нижняя панель: перемотка, транспорт, скорость и синхронизация комнаты. */
 export function BottomBar({
   view,
   label,
@@ -30,6 +33,7 @@ export function BottomBar({
   onToggleCollapsed,
   onTogglePlay,
   onSeek,
+  onSeekTo,
   onRate,
   onReload,
   onSyncToMe,
@@ -39,6 +43,18 @@ export function BottomBar({
 }: BottomBarProps) {
   const { found, playing, time, duration, rate } = view;
   const locked = viewOnly || !found;
+  // Пока пользователь тянет ползунок, показываем его значение, а не сетевое.
+  const [dragValue, setDragValue] = useState<number | null>(null);
+  const maxDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const shownTime = dragValue ?? (Number.isFinite(time) ? time : 0);
+
+  const commitSeek = (): void => {
+    if (dragValue !== null && !locked) {
+      const target = Math.max(0, Math.min(maxDuration || dragValue, dragValue));
+      onSeekTo(target);
+    }
+    setDragValue(null);
+  };
 
   return (
     <footer
@@ -53,7 +69,7 @@ export function BottomBar({
           aria-label="Развернуть панель управления"
         >
           <Icon name={playing ? 'pause' : 'play'} size={16} />
-          <span>{formatTime(time)}</span>
+          <span>{formatTime(shownTime)}</span>
           <Icon name="chevron-up" size={16} />
         </button>
       ) : (
@@ -76,9 +92,6 @@ export function BottomBar({
                 эфир
               </span>
             )}
-            <span className="hw-time">
-              {found ? `${formatTime(time)} / ${formatTime(duration)}` : '—'}
-            </span>
             <button
               type="button"
               className="hw-collapsebtn"
@@ -87,6 +100,34 @@ export function BottomBar({
             >
               <Icon name="chevron-down" size={18} />
             </button>
+          </div>
+
+          <div className="hw-seekrow">
+            <span className="hw-seek-time">{formatTime(shownTime)}</span>
+            <input
+              type="range"
+              className="hw-seek"
+              min={0}
+              max={maxDuration || 0}
+              step={0.1}
+              value={maxDuration ? Math.min(maxDuration, Math.max(0, shownTime)) : 0}
+              disabled={locked || maxDuration <= 0}
+              onChange={(event) => setDragValue(Number(event.target.value))}
+              onPointerUp={commitSeek}
+              onPointerCancel={commitSeek}
+              onTouchEnd={commitSeek}
+              onKeyUp={commitSeek}
+              onBlur={commitSeek}
+              aria-label="Перемотка видео"
+              style={
+                {
+                  '--hw-seek-progress': `${
+                    maxDuration > 0 ? Math.min(100, (shownTime / maxDuration) * 100) : 0
+                  }%`,
+                } as CSSProperties
+              }
+            />
+            <span className="hw-seek-time">{maxDuration > 0 ? formatTime(maxDuration) : '—'}</span>
           </div>
 
           <div className="hw-transport">

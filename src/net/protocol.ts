@@ -500,6 +500,75 @@ export interface SiteUrlData {
 }
 
 /**
+ * Очередь видео комнаты (этап 8): список ссылок и текущий индекс.
+ *
+ * Очередь ведёт только хост — как и адрес сайта. Гости получают её сообщением
+ * `queue` и видят те же названия; само воспроизведение идёт через `site-url`.
+ */
+export const QUEUE_MAX = 30;
+export const QUEUE_TITLE_MAX = 120;
+
+export interface QueueItem {
+  url: string;
+  title: string;
+}
+
+export interface QueueData {
+  items: QueueItem[];
+  index: number;
+}
+
+function isWebUrl(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 2048 &&
+    /^(https?|file):\/\//i.test(value)
+  );
+}
+
+/** Один элемент очереди: только http(s)/file и обрезанное название. */
+export function normalizeQueueItem(value: unknown): QueueItem | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  if (!isWebUrl(data.url)) {
+    return null;
+  }
+  const title =
+    typeof data.title === 'string' && data.title.trim().length > 0
+      ? data.title.trim().slice(0, QUEUE_TITLE_MAX)
+      : data.url.replace(/^https?:\/\//, '').slice(0, QUEUE_TITLE_MAX);
+  return { url: data.url, title };
+}
+
+/** Очередь из сообщения: не больше QUEUE_MAX элементов, индекс в границах. */
+export function normalizeQueueData(value: unknown): QueueData | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  if (!Array.isArray(data.items) || data.items.length > QUEUE_MAX) {
+    return null;
+  }
+  const items: QueueItem[] = [];
+  for (const raw of data.items) {
+    const item = normalizeQueueItem(raw);
+    if (!item) {
+      return null;
+    }
+    items.push(item);
+  }
+  const parsedIndex =
+    typeof data.index === 'number' && Number.isFinite(data.index)
+      ? Math.floor(data.index)
+      : 0;
+  const index = Math.min(Math.max(0, parsedIndex), Math.max(0, items.length - 1));
+  return { items, index };
+}
+
+/**
  * Как хост захватил кадр: прямой `video.captureStream()` или фоллбэк
  * canvas + WebAudio (§2.3, этап 5). Поле нужно зрителю для диагностики.
  */

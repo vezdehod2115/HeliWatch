@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BottomBar } from '../site/BottomBar';
 import { TopBar } from '../site/TopBar';
 import { RoomBar } from './RoomBar';
+import { VideoWindow, type VideoWindowRect } from './VideoWindow';
+import { RoomQueue } from './RoomQueue';
+import { BrowseOverlay } from './BrowseOverlay';
 import { LocalPlayer, type LocalPlayerHandle } from '../localplay/LocalPlayer';
 import {
   RemoteStreamPlayer,
@@ -27,6 +30,7 @@ import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl, sendSiteCommand } from '../..
 import type { LocalProfile } from '../../db/repo/identity';
 import { LOBBY_ROOM_ID, roomLink } from '../../net/protocol';
 import {
+  QUEUE_MAX,
   actionFromVideoEvent,
   projectState,
   STREAM_MAX_VIEWERS,
@@ -34,6 +38,7 @@ import {
   type PlaybackAction,
   type PlaybackSample,
   type PlaybackState,
+  type QueueItem,
   type RoomMetaPayload,
   type RoomMode,
   type RoomRole,
@@ -87,6 +92,7 @@ import {
   type SessionPayloadInput,
 } from '../pip/pipState';
 import { enterPip, readSessionInfo, updatePipState } from '../../native/pip';
+import { setRegionSyncPaused } from '../../native/regions';
 import {
   setKeepScreenOn,
   startSession,
@@ -128,6 +134,10 @@ const EMPTY_VIEW: PlaybackView = {
 const TYPING_IDLE_MS = 2500;
 const DEFAULT_REACTION_X = 0.5;
 const DEFAULT_REACTION_Y = 0.62;
+/** Поиск (этап 8): тап по окну без видео открывает Google. */
+const GOOGLE_URL = 'https://www.google.com/';
+const GOOGLE_SEARCH_URL = 'https://www.google.com/search?q=';
+const WINDOW_RADIUS = 18;
 
 function sampleFromView(view: PlaybackView, action: PlaybackAction): PlaybackSample {
   return {
@@ -190,6 +200,12 @@ export function RoomScreen({
   const [remotePlaying, setRemotePlaying] = useState(false);
   const [remoteDimensions, setRemoteDimensions] = useState({ width: 0, height: 0 });
   const [ageGateHidden, setAgeGateHidden] = useState(false);
+  // Этап 8: видео-окно комнаты, полноэкранный поиск и очередь видео.
+  const [browse, setBrowse] = useState(false);
+  const [windowControls, setWindowControls] = useState(false);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [queueOpen, setQueueOpen] = useState(false);
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
@@ -242,6 +258,19 @@ export function RoomScreen({
     mic: () => undefined,
     leave: () => undefined,
   });
+  /** Этап 8: поиск, окно и очередь. */
+  const browseRef = useRef(false);
+  const urlRef = useRef('');
+  const browseStartUrl = useRef('');
+  const roomUrlRef = useRef('');
+  const lastWindowSig = useRef('');
+  const returnTimer = useRef<number | null>(null);
+  const controlsTimer = useRef<number | null>(null);
+  const queueRef = useRef<QueueItem[]>([]);
+  const queueIndexRef = useRef(0);
+  const lastRectRef = useRef<VideoWindowRect | null>(null);
+  const resumePlaybackRef = useRef<() => void>(() => undefined);
+  const nextQueueRef = useRef<() => void>(() => undefined);
 
   notifyRef.current = notify;
   onLeaveRef.current = onLeave;
@@ -251,6 +280,15 @@ export function RoomScreen({
   localFileRef.current = localFile;
   streamInfoRef.current = streamInfo;
   viewerRef.current = viewerImageId;
+  browseRef.current = browse;
+  urlRef.current = site.status.url;
+  queueRef.current = queue;
+  queueIndexRef.current = queueIndex;
+  /** Хост «по факту»: после передачи/миграции роль в снимке меняется. */
+  const selfHost =
+    snapshot.hostUserId !== null
+      ? snapshot.hostUserId === identity.userId
+      : role === 'host';
   memberNameRef.current = (peerId: string) => {
     const member = useRoomStore
       .getState()
@@ -1001,6 +1039,14 @@ export function RoomScreen({
             loadSiteOnce(event.url);
           }
           break;
+        case 'queue': {
+          // Очередь ведёт хост: у гостя — только отображение.
+          queueRef.current = event.items;
+          queueIndexRef.current = event.index;
+          setQueue(event.items);
+          setQueueIndex(event.index);
+          break;
+        }
         case 'hint':
           store.patch({ hint: event.message });
           break;
@@ -1371,7 +1417,14 @@ export function RoomScreen({
             setReactionsOpen(false);
             setViewerImageId(null);
             setModerationOpen(false);
+            setQueueOpen(false);
+            exitBrowse(false);
           }
+          return;
+        }
+        if (event.t === 'resume-playback') {
+          // Activity вернулась из фона/PiP: система могла поставить видео на паузу.
+          resumePlaybackRef.current();
           return;
         }
         if (event.t === 'pip-action') {
@@ -1388,6 +1441,14 @@ export function RoomScreen({
         }
         if (event.t === 'back-overlay') {
           // Системный back при открытой панели: закрываем верхнюю.
+          if (browseRef.current) {
+            exitBrowse(true);
+            return;
+          }
+          if (queueOpen) {
+            setQueueOpen(false);
+            return;
+          }
           if (moderationOpen) {
             setModerationOpen(false);
             return;
@@ -1417,9 +1478,48 @@ export function RoomScreen({
           typeof event.data === 'object' && event.data !== null
             ? (event.data as Record<string, unknown>)
             : {};
+        // Новая страница получила инжект: возвращаем рамку окна, иначе сайт
+        // останется на весь экран без видео-окна.
+        if (event.event === 'hook-ready') {
+          const rect = lastRectRef.current;
+          if (rect && !browseRef.current) {
+            window.setTimeout(() => {
+              if (!browseRef.current) {
+                lastWindowSig.current = '';
+                handleWindowRect(rect);
+              }
+            }, 180);
+          }
+          return;
+        }
         const videoEvent = typeof data.event === 'string' ? data.event : '';
         if (!videoEvent || videoEvent.startsWith('remote-')) {
           return;
+        }
+        // Поиск (этап 8): выбрали ролик на сайте — возвращаемся в комнату,
+        // видео заиграет в окне. Google-выдачу не считаем выбором.
+        if (browseRef.current && (videoEvent === 'found' || videoEvent === 'playing')) {
+          let host = '';
+          try {
+            host = new URL(urlRef.current).hostname;
+          } catch {
+            host = '';
+          }
+          if (!host || !/(^|\.)google\./i.test(host)) {
+            if (returnTimer.current !== null) {
+              window.clearTimeout(returnTimer.current);
+            }
+            returnTimer.current = window.setTimeout(() => {
+              returnTimer.current = null;
+              if (!browseRef.current) {
+                return;
+              }
+              roomUrlRef.current = urlRef.current;
+              browseRef.current = false;
+              setBrowse(false);
+              lastWindowSig.current = '';
+            }, 700);
+          }
         }
         if (Date.now() < applyingRemoteUntil.current) {
           return;
@@ -1436,19 +1536,29 @@ export function RoomScreen({
         if (action) {
           reportAction(action, sample);
         }
+        // Очередь: по окончании ролика хост включает следующий.
+        if (videoEvent === 'ended') {
+          nextQueueRef.current();
+        }
       }),
-    [site.onEvent, reportAction, moderationOpen],
+    [site.onEvent, reportAction, moderationOpen, queueOpen],
   );
 
   // Системный back перехватывается, только пока открыта панель React.
   useEffect(() => {
-    const captured = chat.open || chat.emojiOpen || viewerImageId !== null || moderationOpen;
+    const captured =
+      chat.open ||
+      chat.emojiOpen ||
+      viewerImageId !== null ||
+      moderationOpen ||
+      queueOpen ||
+      browse;
     siteRef.current.setBackCapture(captured);
     return () => {
       // Уходим из комнаты с открытой панелью — back снова принадлежит истории.
       siteRef.current.setBackCapture(false);
     };
-  }, [chat.open, chat.emojiOpen, viewerImageId, moderationOpen]);
+  }, [chat.open, chat.emojiOpen, viewerImageId, moderationOpen, queueOpen, browse]);
 
   // «Печатает…» протухает само: чистим раз в секунду, пока чат открыт.
   useEffect(() => {
@@ -1477,6 +1587,10 @@ export function RoomScreen({
   // Системный back на корне истории сайта выходит из комнаты.
   useEffect(() => {
     if (site.status.backRootAt > backAtMount.current) {
+      if (browseRef.current) {
+        exitBrowse(true);
+        return;
+      }
       leave();
     }
   }, [site.status.backRootAt, leave]);
@@ -1700,11 +1814,6 @@ export function RoomScreen({
   );
 
   const siteVideo = site.status.video;
-  /** Хост «по факту»: после передачи/миграции роль в снимке меняется. */
-  const selfHost =
-    snapshot.hostUserId !== null
-      ? snapshot.hostUserId === identity.userId
-      : role === 'host';
   const roomFull = snapshot.members.length >= snapshot.limit;
   const streamViewer = snapshot.mode === 'stream' && !selfHost;
 
@@ -1918,6 +2027,31 @@ export function RoomScreen({
   // Кнопки PiP и уведомления вызывают те же обработчики, что и панель.
   pipHandlers.current = { toggle: togglePlay, mic: toggleMic, leave };
 
+  // Возврат из фона/PiP: если система поставила видео на паузу, продолжаем.
+  resumePlaybackRef.current = () => {
+    if (useRoomStore.getState().phase !== 'joined') {
+      return;
+    }
+    if (modeRef.current === 'site') {
+      const video = siteRef.current.status.video;
+      if (video.playing || !video.found) {
+        return;
+      }
+      siteRef.current.applyPlayback({ kind: 'play' });
+      reportAction(
+        { kind: 'play' },
+        { playing: true, time: video.time, rate: video.rate, duration: video.duration },
+      );
+      return;
+    }
+    const local = localRef.current;
+    if (!local || local.sample().playing) {
+      return;
+    }
+    local.apply({ kind: 'play' });
+    reportAction({ kind: 'play' }, { ...local.sample(), playing: true });
+  };
+
   const seekBy = (seconds: number) => {
     if (!found) {
       return;
@@ -1989,6 +2123,272 @@ export function RoomScreen({
     }
   };
 
+  // ---------- Этап 8: видео-окно, полноэкранный поиск и очередь ----------
+
+  const publishQueueState = (items: QueueItem[], index: number): void => {
+    const clamped = Math.min(Math.max(0, index), Math.max(0, items.length - 1));
+    queueRef.current = items;
+    queueIndexRef.current = clamped;
+    setQueue(items);
+    setQueueIndex(clamped);
+    clientRef.current?.publishQueue(items, clamped);
+  };
+
+  const addCurrentToQueue = (): void => {
+    if (!selfHost) {
+      notifyRef.current('Очередью управляет хост');
+      return;
+    }
+    if (!siteRef.current.status.video.found) {
+      notifyRef.current('Сначала откройте видео на сайте');
+      return;
+    }
+    const url = urlRef.current;
+    if (!/^(https?|file):\/\//i.test(url)) {
+      notifyRef.current('Не понял адрес страницы с видео');
+      return;
+    }
+    const title = siteRef.current.status.title || url;
+    const rest = queueRef.current.filter((item) => item.url !== url);
+    const next = [...rest, { url, title }].slice(-QUEUE_MAX);
+    publishQueueState(next, next.length - 1);
+    notifyRef.current(`Видео в очереди: ${next.length}`);
+  };
+
+  const playQueueIndex = (index: number): void => {
+    const item = queueRef.current[index];
+    if (!item) {
+      return;
+    }
+    if (!selfHost) {
+      notifyRef.current('Очередью управляет хост');
+      return;
+    }
+    queueIndexRef.current = index;
+    setQueueIndex(index);
+    clientRef.current?.publishQueue(queueRef.current, index);
+    roomUrlRef.current = item.url;
+    browseRef.current = false;
+    setBrowse(false);
+    setQueueOpen(false);
+    lastWindowSig.current = '';
+    void siteRef.current.openUrl(item.url).then(() => {
+      clientRef.current?.publishSiteUrl(item.url);
+    });
+    notifyRef.current(`Играем: ${item.title}`);
+  };
+
+  const nextInQueue = (auto = false): void => {
+    const items = queueRef.current;
+    if (!selfHost || items.length === 0) {
+      return;
+    }
+    const current = items.findIndex((item) => item.url === urlRef.current);
+    const base = current >= 0 ? current : queueIndexRef.current;
+    if (base + 1 < items.length) {
+      playQueueIndex(base + 1);
+    } else if (!auto) {
+      notifyRef.current('Очередь закончилась');
+    }
+  };
+  nextQueueRef.current = () => nextInQueue(true);
+
+  const removeQueueIndex = (index: number): void => {
+    if (!selfHost) {
+      return;
+    }
+    const items = queueRef.current.filter((_, itemIndex) => itemIndex !== index);
+    let active = queueIndexRef.current;
+    if (index < active) {
+      active -= 1;
+    }
+    if (active >= items.length) {
+      active = Math.max(0, items.length - 1);
+    }
+    publishQueueState(items, active);
+  };
+
+  const clearQueue = (): void => {
+    if (!selfHost) {
+      return;
+    }
+    publishQueueState([], 0);
+  };
+
+  const searchSite = (query: string): void => {
+    if (!selfHost) {
+      notifyRef.current('Ссылку выбирает хост комнаты');
+      return;
+    }
+    const text = query.trim();
+    const url = text ? `${GOOGLE_SEARCH_URL}${encodeURIComponent(text)}` : GOOGLE_URL;
+    void siteRef.current.openUrl(url);
+  };
+
+  const openBrowsePage = (url: string): void => {
+    if (!selfHost) {
+      notifyRef.current('Ссылку выбирает хост комнаты');
+      return;
+    }
+    void siteRef.current.openUrl(url);
+  };
+
+  /** Тап по окну без видео: меню комнаты скрываются, открывается поиск. */
+  const enterBrowse = (): void => {
+    if (modeRef.current !== 'site') {
+      return;
+    }
+    if (!selfHost) {
+      notifyRef.current('Ссылку выбирает хост комнаты');
+      return;
+    }
+    browseStartUrl.current = urlRef.current;
+    if (!roomUrlRef.current) {
+      roomUrlRef.current = urlRef.current;
+    }
+    browseRef.current = true;
+    setBrowse(true);
+    setWindowControls(false);
+    setQueueOpen(false);
+    setModerationOpen(false);
+    setViewerImageId(null);
+    setReactionsOpen(false);
+    const chatState = useChatStore.getState();
+    chatState.setOpen(false);
+    chatState.setEmojiOpen(false);
+    lastWindowSig.current = '';
+    void sendSiteCommand({ cmd: 'setWindow', on: false });
+    if (!/^https:\/\/(www\.)?google\./i.test(urlRef.current)) {
+      void siteRef.current.openUrl(GOOGLE_URL);
+    }
+  };
+
+  /** Возврат в комнату из поиска: без выбранного видео — прежняя страница. */
+  const exitBrowse = (restore = true): void => {
+    if (!browseRef.current) {
+      return;
+    }
+    browseRef.current = false;
+    setBrowse(false);
+    if (returnTimer.current !== null) {
+      window.clearTimeout(returnTimer.current);
+      returnTimer.current = null;
+    }
+    const target = roomUrlRef.current;
+    const current = urlRef.current;
+    if (restore && target && target !== current && !siteRef.current.status.video.found) {
+      void siteRef.current.openUrl(target);
+    }
+    lastWindowSig.current = '';
+  };
+
+  const handleWindowRect = useCallback((rect: VideoWindowRect): void => {
+    lastRectRef.current = rect;
+    if (modeRef.current !== 'site' || browseRef.current) {
+      return;
+    }
+    const x = Math.round(rect.x);
+    const y = Math.round(rect.y);
+    const w = Math.round(rect.w);
+    const h = Math.round(rect.h);
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    const signature = `${x}:${y}:${w}:${h}`;
+    if (signature === lastWindowSig.current) {
+      return;
+    }
+    lastWindowSig.current = signature;
+    void sendSiteCommand({
+      cmd: 'setWindow',
+      on: true,
+      x,
+      y,
+      w,
+      h,
+      radius: WINDOW_RADIUS,
+    });
+  }, []);
+
+  const handleWindowTap = (): void => {
+    if (!found) {
+      enterBrowse();
+      return;
+    }
+    setWindowControls((value) => !value);
+    if (controlsTimer.current !== null) {
+      window.clearTimeout(controlsTimer.current);
+    }
+    controlsTimer.current = window.setTimeout(() => {
+      controlsTimer.current = null;
+      setWindowControls(false);
+    }, 4200);
+  };
+
+  // PiP: панелей нет — не гоняем зоны касания в Kotlin каждую секунду.
+  useEffect(() => {
+    setRegionSyncPaused(pipActive);
+    return () => setRegionSyncPaused(false);
+  }, [pipActive]);
+
+  // Поиск: пока меню скрыто, страница показывается целиком (без рамки окна).
+  useEffect(() => {
+    if (snapshot.mode !== 'site') {
+      return;
+    }
+    if (browse) {
+      lastWindowSig.current = '';
+      void sendSiteCommand({ cmd: 'setWindow', on: false });
+    }
+  }, [browse, snapshot.mode]);
+
+  // Новая страница (навигация) теряет frame-класс: ставим окно заново.
+  useEffect(() => {
+    if (browse || snapshot.mode !== 'site') {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const rect = lastRectRef.current;
+      if (!rect) {
+        return;
+      }
+      lastWindowSig.current = '';
+      handleWindowRect(rect);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [site.status.url, site.status.hookReady, browse, snapshot.mode, handleWindowRect]);
+
+  // После PiP возвращаем окно: системный слой мог перерисовать страницу.
+  useEffect(() => {
+    if (!pipActive) {
+      lastWindowSig.current = '';
+    }
+  }, [pipActive]);
+
+  // Хост публикует очередь при смене состава: поздний гость получит актуальный
+  // список (welcome его не несёт).
+  useEffect(() => {
+    if (!selfHost || snapshot.mode !== 'site' || snapshot.phase !== 'joined') {
+      return;
+    }
+    clientRef.current?.publishQueue(queueRef.current, queueIndexRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selfHost, snapshot.mode, snapshot.phase, snapshot.members.length]);
+
+  // Уход из комнаты: снимаем рамку страницы, чтобы сайт не остался обрезанным.
+  useEffect(
+    () => () => {
+      if (returnTimer.current !== null) {
+        window.clearTimeout(returnTimer.current);
+      }
+      if (controlsTimer.current !== null) {
+        window.clearTimeout(controlsTimer.current);
+      }
+      void sendSiteCommand({ cmd: 'setWindow', on: false });
+    },
+    [],
+  );
+
   const driverName =
     snapshot.driverId === identity.userId
       ? 'Ведёте вы'
@@ -2004,9 +2404,11 @@ export function RoomScreen({
 
   return (
     <div
-      className={`hw-app hw-app--room hw-app--${snapshot.mode}${pipActive ? ' hw-app--pip' : ''}`}
+      className={`hw-app hw-app--room hw-app--${snapshot.mode}${
+        pipActive ? ' hw-app--pip' : ''
+      }${browse ? ' hw-app--browsing' : ''}`}
     >
-      {!pipActive && (
+      {!pipActive && !browse && (
         <RoomBar
           code={code}
           title={snapshot.title}
@@ -2038,7 +2440,7 @@ export function RoomScreen({
         />
       )}
 
-      {!pipActive && selfHost && (
+      {!pipActive && !browse && selfHost && (
         <JoinRequests
           requests={snapshot.joinRequests}
           onAccept={acceptJoin}
@@ -2046,7 +2448,7 @@ export function RoomScreen({
         />
       )}
 
-      {!pipActive && snapshot.mode === 'stream' && role === 'host' && (
+      {!pipActive && !browse && snapshot.mode === 'stream' && role === 'host' && (
         <div className="hw-streambar" aria-live="polite">
           <Icon name="broadcast" size={16} />
           <span className="hw-streambar-text">
@@ -2064,7 +2466,7 @@ export function RoomScreen({
         </div>
       )}
 
-      {!pipActive && snapshot.mode === 'site' && (
+      {!pipActive && !browse && snapshot.mode === 'site' && (
         <TopBar
           status={site.status}
           zonesOpen={zonesOpen}
@@ -2083,6 +2485,9 @@ export function RoomScreen({
           }}
           onNav={site.nav}
           onToggleZones={onToggleZones}
+          onSearch={enterBrowse}
+          onQueue={() => setQueueOpen(true)}
+          queueCount={queue.length}
           compact
           addressLocked={!selfHost}
         />
@@ -2090,13 +2495,40 @@ export function RoomScreen({
 
       <div className={`hw-mid${pipActive ? ' hw-mid--pip' : ''}`}>
         {snapshot.mode === 'site' ? (
-          <main className="hw-stage" aria-hidden="true">
-            {!pipActive && waiting && (
+          <main className={`hw-stage${browse ? ' hw-stage--browse' : ''}`}>
+            {!pipActive && !browse && waiting && (
               <div className="hw-roomwait" data-hw-region="roomwait">
                 <span className="hw-spinner" aria-hidden="true" />
-                <strong>{snapshot.phase === 'reconnecting' ? 'Переподключаемся…' : 'Подключаемся к комнате'}</strong>
+                <strong>
+                  {snapshot.phase === 'reconnecting'
+                    ? 'Переподключаемся…'
+                    : 'Подключаемся к комнате'}
+                </strong>
                 <span>Код {code}. Сайт откроется, когда хост ответит.</span>
               </div>
+            )}
+            {!pipActive && !browse && !waiting && (
+              <VideoWindow
+                found={siteVideo.found}
+                playing={view.playing}
+                time={view.time}
+                duration={view.duration}
+                title={site.status.title || siteVideo.src}
+                isHost={selfHost}
+                viewOnly={false}
+                controlsOpen={windowControls}
+                queueCount={queue.length}
+                browserAvailable={selfHost}
+                onRect={handleWindowRect}
+                onTap={handleWindowTap}
+                onToggleControls={() => setWindowControls((value) => !value)}
+                onTogglePlay={togglePlay}
+                onSeekTo={(seconds) => applyAndReport({ kind: 'seek', t: seconds })}
+                onSeekBy={seekBy}
+                onSearch={enterBrowse}
+                onQueue={() => setQueueOpen(true)}
+                onAddToQueue={addCurrentToQueue}
+              />
             )}
           </main>
         ) : snapshot.mode === 'stream' && streamViewer ? (
@@ -2137,7 +2569,7 @@ export function RoomScreen({
           />
         )}
 
-        {!pipActive && chat.open && (
+        {!pipActive && !browse && chat.open && (
           <ChatPanel
             messages={chat.messages}
             images={chat.images}
@@ -2163,14 +2595,18 @@ export function RoomScreen({
         )}
       </div>
 
-      {!pipActive && (
+      {!pipActive && !browse && (
         <FloatingReactions
           reactions={chat.reactions}
           onDone={(key) => useChatStore.getState().dropReaction(key)}
         />
       )}
 
-      {!pipActive && settings.ageGate && site.status.ageGate?.detected && !ageGateHidden && (
+      {!pipActive &&
+        !browse &&
+        settings.ageGate &&
+        site.status.ageGate?.detected &&
+        !ageGateHidden && (
         <div className="hw-agegate" data-hw-region="agegate">
           <Icon name="lock" size={18} />
           <div className="hw-agegate-text">
@@ -2191,7 +2627,7 @@ export function RoomScreen({
         </div>
       )}
 
-      {!pipActive && (
+      {!pipActive && !browse && (
         <ChatDock
           lastMessage={lastMessage}
           unread={chat.unread}
@@ -2218,7 +2654,7 @@ export function RoomScreen({
         />
       )}
 
-      {!pipActive && (
+      {!pipActive && !browse && (
         <BottomBar
           view={view}
           label={label}
@@ -2227,6 +2663,7 @@ export function RoomScreen({
           onToggleCollapsed={() => setCollapsed((value) => !value)}
           onTogglePlay={togglePlay}
           onSeek={seekBy}
+          onSeekTo={(seconds) => applyAndReport({ kind: 'seek', t: seconds })}
           onRate={setRate}
           onReload={site.reload}
           onSyncToMe={syncToMe}
@@ -2241,6 +2678,36 @@ export function RoomScreen({
           message={pipMessageLine(lastMessage)}
           micOn={voiceActive && !voiceMuted}
           startedAt={sessionStartedAt.current}
+        />
+      )}
+
+      {!pipActive && browse && (
+        <BrowseOverlay
+          url={site.status.url}
+          title={site.status.title}
+          found={siteVideo.found}
+          playing={siteVideo.playing}
+          onBack={() => exitBrowse(true)}
+          onSearch={searchSite}
+          onGoogle={() => openBrowsePage(GOOGLE_URL)}
+          onYoutube={() => openBrowsePage(YOUTUBE_URL)}
+          onWatchHere={() => exitBrowse(false)}
+          onAddToQueue={addCurrentToQueue}
+        />
+      )}
+
+      {!pipActive && (
+        <RoomQueue
+          open={queueOpen}
+          items={queue}
+          index={queueIndex}
+          canEdit={selfHost}
+          currentUrl={site.status.url}
+          onClose={() => setQueueOpen(false)}
+          onPlay={playQueueIndex}
+          onRemove={removeQueueIndex}
+          onAddCurrent={addCurrentToQueue}
+          onClear={clearQueue}
         />
       )}
 

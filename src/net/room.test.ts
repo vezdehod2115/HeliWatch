@@ -945,3 +945,34 @@ describe('RoomClient: открытые/закрытые комнаты и пар
     );
   });
 });
+
+describe('RoomClient: очередь видео (этап 8)', () => {
+  it('хост публикует очередь, гость видит её и не может менять', async () => {
+    const { host, guest, hostEvents, guestEvents } = await createPair();
+    host.publishQueue(
+      [
+        { url: 'https://youtu.be/a', title: 'Первый' },
+        { url: 'https://youtu.be/b', title: 'Второй' },
+      ],
+      1,
+    );
+    await settle(host, guest);
+
+    const received = guestEvents.filter((event) => event.type === 'queue');
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      type: 'queue',
+      index: 1,
+      items: [
+        { url: 'https://youtu.be/a', title: 'Первый' },
+        { url: 'https://youtu.be/b', title: 'Второй' },
+      ],
+    });
+
+    // Гость не хост: его очередь не должна приниматься ни хостом, ни им самим.
+    guest.publishQueue([{ url: 'https://youtu.be/c', title: 'Третий' }], 0);
+    await settle(host, guest);
+    expect(guestEvents.filter((event) => event.type === 'queue')).toHaveLength(1);
+    expect(hostEvents.some((event) => event.type === 'queue')).toBe(false);
+  });
+});

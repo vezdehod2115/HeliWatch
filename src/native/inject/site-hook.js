@@ -44,6 +44,13 @@
     applyingUntil: 0,
     lastTimePost: 0,
     pipStyle: false,
+    frameStyle: false,
+    /* PiP: полноэкранный кадр поверх страницы, без панелей сайта. */
+    pipMode: false,
+    /* Видео-окно комнаты: {x, y, w, h, r} в CSS-пикселях страницы. */
+    frame: null,
+    frameAncestors: [],
+    observer: null,
     frameCanvas: null,
     frameRgb: null,
     frameTainted: false,
@@ -176,6 +183,9 @@
     for (var i = 0; i < VIDEO_EVENTS.length; i += 1) {
       video.addEventListener(VIDEO_EVENTS[i], onMediaEvent, true);
     }
+    // Страница могла пересоздать <video> (YouTube SPA, переключение ролика):
+    // возвращаем кадру/окну актуальный элемент.
+    applyFrameAncestors(video);
     emitVideo('found');
   }
 
@@ -200,39 +210,171 @@
   }
 
   /**
-   * PiP (этап 4): класс `hw-pip` на <html> и один стиль на страницу.
-   * Стиль прячет чужие контролы, которые в маленьком окне перекрывают видео
-   * (нижняя панель YouTube и градиенты). Инжект при этом не перезагружается.
+   * PiP (этап 4) и видео-окно комнаты (этап 8).
+   *
+   * Один и тот же приём: страница становится прозрачной, её содержимое прячется,
+   * а <video> выносится в fixed-слой нужного прямоугольника. В PiP это весь
+   * экран, в комнате — центральное окно, вокруг которого React рисует панели.
+   * Инжект не перезагружается, позиция обновляется CSS-переменными.
    */
-  function ensurePipStyle() {
-    if (state.pipStyle) {
+  function ensureFrameStyle() {
+    if (state.frameStyle) {
       return;
     }
     try {
       var style = document.createElement('style');
-      style.id = '__heliwatch_pip';
+      style.id = '__heliwatch_frame';
       style.textContent =
-        'html.hw-pip,html.hw-pip body{background:transparent !important;}' +
-        'html.hw-pip video{object-fit:contain !important;}' +
+        'html.hw-pip,html.hw-pip body,html.hw-framed body{background:transparent !important;overflow:hidden !important;}' +
+        'html.hw-framed{background:radial-gradient(120% 70% at 50% 0%, #0d3a34, #041615 72%) !important;overflow:hidden !important;}' +
+        'html.hw-framed body > *{visibility:hidden !important;}' +
+        'html.hw-framed body video,html.hw-pip body video{visibility:visible !important;position:fixed !important;' +
+        'left:var(--hw-vx,0px) !important;top:var(--hw-vy,0px) !important;' +
+        'width:var(--hw-vw,100vw) !important;height:var(--hw-vh,100vh) !important;' +
+        'right:auto !important;bottom:auto !important;min-width:0 !important;min-height:0 !important;' +
+        'max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;' +
+        'object-fit:contain !important;background:#000 !important;' +
+        'border-radius:var(--hw-vr,0px) !important;z-index:2147483647 !important;}' +
+        'html.hw-framed body video::-webkit-media-controls,html.hw-pip body video::-webkit-media-controls{display:none !important;}' +
+        'html.hw-framed .hw-frame-plain{transform:none !important;filter:none !important;' +
+        'perspective:none !important;contain:none !important;will-change:auto !important;' +
+        'opacity:1 !important;}' +
         'html.hw-pip .ytp-chrome-bottom,html.hw-pip .ytp-chrome-top,' +
         'html.hw-pip .ytp-gradient-bottom,html.hw-pip .ytp-gradient-top,' +
         'html.hw-pip .ytp-pause-overlay,html.hw-pip .ytp-unmute,' +
         'html.hw-pip .hw-pip-hide{display:none !important;opacity:0 !important;}';
       (document.head || document.documentElement).appendChild(style);
-      state.pipStyle = true;
+      state.frameStyle = true;
     } catch (error) {
       /* старая страница — просто класс, без стиля */
     }
   }
 
+  function ensurePipStyle() {
+    ensureFrameStyle();
+    state.pipStyle = true;
+  }
+
+  function clearFrameAncestors() {
+    for (var i = 0; i < state.frameAncestors.length; i += 1) {
+      try {
+        state.frameAncestors[i].classList.remove('hw-frame-plain');
+      } catch (error) {
+        /* узел мог исчезнуть */
+      }
+    }
+    state.frameAncestors = [];
+  }
+
+  /**
+   * Предки видео с transform/filter создают containing block для fixed —
+   * сбрасываем их, иначе окно «прилипает» к контейнеру плеера, а не к экрану.
+   */
+  function applyFrameAncestors(video) {
+    clearFrameAncestors();
+    if (!video || (!state.frame && !state.pipMode)) {
+      return;
+    }
+    var node = video.parentElement;
+    var depth = 0;
+    while (node && node !== document.documentElement && depth < 40) {
+      try {
+        node.classList.add('hw-frame-plain');
+        state.frameAncestors.push(node);
+      } catch (error) {
+        break;
+      }
+      node = node.parentElement;
+      depth += 1;
+    }
+  }
+
+  function renderFrame() {
+    var root = document.documentElement;
+    var frame = state.pipMode ? { x: 0, y: 0, w: 0, h: 0, r: 0 } : state.frame;
+    if (!frame) {
+      root.classList.remove('hw-framed');
+      root.classList.remove('hw-pip');
+      clearFrameAncestors();
+      return;
+    }
+    ensureFrameStyle();
+    root.classList.add('hw-framed');
+    if (state.pipMode) {
+      root.classList.add('hw-pip');
+      root.style.setProperty('--hw-vx', '0px');
+      root.style.setProperty('--hw-vy', '0px');
+      root.style.setProperty('--hw-vw', '100vw');
+      root.style.setProperty('--hw-vh', '100vh');
+      root.style.setProperty('--hw-vr', '0px');
+    } else {
+      root.classList.remove('hw-pip');
+      root.style.setProperty('--hw-vx', Math.round(frame.x) + 'px');
+      root.style.setProperty('--hw-vy', Math.round(frame.y) + 'px');
+      root.style.setProperty('--hw-vw', Math.round(frame.w) + 'px');
+      root.style.setProperty('--hw-vh', Math.round(frame.h) + 'px');
+      root.style.setProperty('--hw-vr', (frame.r || 0) + 'px');
+    }
+    applyFrameAncestors(state.video || pickVideo());
+  }
+
   function setPipMode(on) {
     try {
-      ensurePipStyle();
+      state.pipMode = !!on;
+      // В маленьком окне не крутим тяжёлые наблюдатели за DOM.
       if (on) {
-        document.documentElement.classList.add('hw-pip');
+        if (state.observer) {
+          state.observer.disconnect();
+          state.observer = null;
+        }
       } else {
-        document.documentElement.classList.remove('hw-pip');
+        startObserver();
       }
+      renderFrame();
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /** Видео-окно комнаты: прямоугольник в CSS-пикселях страницы. */
+  function setWindowMode(on, cmd) {
+    try {
+      if (!on) {
+        state.frame = null;
+      } else {
+        var x = Number(cmd.x);
+        var y = Number(cmd.y);
+        var w = Number(cmd.w);
+        var h = Number(cmd.h);
+        if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h) || w <= 0 || h <= 0) {
+          return false;
+        }
+        // Координаты приходят в CSS-пикселях экрана, а страница с
+        // useWideViewPort может быть отмасштабирована (десктопный layout).
+        // Переводим прямоугольник в систему координат layout viewport.
+        var viewport = window.visualViewport;
+        var scaleX = viewport && viewport.width > 0 ? window.innerWidth / viewport.width : 1;
+        var scaleY = viewport && viewport.height > 0 ? window.innerHeight / viewport.height : 1;
+        if (!isFinite(scaleX) || scaleX <= 0) {
+          scaleX = 1;
+        }
+        if (!isFinite(scaleY) || scaleY <= 0) {
+          scaleY = 1;
+        }
+        x = x * scaleX + (viewport ? viewport.offsetLeft : 0);
+        y = y * scaleY + (viewport ? viewport.offsetTop : 0);
+        w = w * scaleX;
+        h = h * scaleY;
+        state.frame = {
+          x: x,
+          y: y,
+          w: w,
+          h: h,
+          r: (Number(cmd.radius) || 0) * Math.min(scaleX, scaleY),
+        };
+      }
+      renderFrame();
       return true;
     } catch (error) {
       return false;
@@ -302,6 +444,10 @@
   }
 
   function sampleFrame() {
+    // В PiP/окне комнаты кадр для акцента не нужен: экономим CPU и батарею.
+    if (state.pipMode) {
+      return;
+    }
     var video = state.video || pickVideo();
     if (!video || !video.videoWidth || video.paused) {
       return;
@@ -361,7 +507,7 @@
    * видео в браузере. Флаг выключается командой setAgeGate из настроек.
    */
   function detectAgeGate() {
-    if (!state.ageGate) {
+    if (!state.ageGate || state.pipMode) {
       return;
     }
     var detected = false;
@@ -410,16 +556,23 @@
     });
   }
 
-  function boot() {
-    scan();
+  function startObserver() {
+    if (state.observer) {
+      return;
+    }
     try {
-      var observer = new MutationObserver(function () {
+      state.observer = new MutationObserver(function () {
         scan();
       });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
+      state.observer.observe(document.documentElement, { childList: true, subtree: true });
     } catch (error) {
-      /* старый WebView — обойдёмся периодическим сканом */
+      state.observer = null;
     }
+  }
+
+  function boot() {
+    scan();
+    startObserver();
     setInterval(scan, 2500);
     setInterval(sampleFrame, FRAME_INTERVAL_MS);
     setInterval(detectAgeGate, 2500);
@@ -436,6 +589,9 @@
   // SPA-навигация (YouTube): пересканировать видео после смены URL.
   var lastHref = location.href;
   setInterval(function () {
+    if (state.pipMode) {
+      return;
+    }
     if (location.href !== lastHref) {
       lastHref = location.href;
       scan();
@@ -465,6 +621,13 @@
             post({ t: 'age-gate', detected: false, host: location.hostname, hint: '' });
           }
           return true;
+        }
+        if (name === 'setWindow') {
+          // Видео-окно комнаты: не требует, чтобы видео уже нашлось.
+          return setWindowMode(!!cmd.on, cmd);
+        }
+        if (name === 'setPip') {
+          return setPipMode(!!cmd.on);
         }
         var video = state.video || pickVideo();
         if (!video) {

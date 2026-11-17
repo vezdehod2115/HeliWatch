@@ -54,6 +54,7 @@ import {
   isValidState,
   normalizeChatText,
   normalizePassword,
+  normalizeQueueData,
   normalizeRoomCode,
   normalizeRoomLimit,
   normalizeRoomTitle,
@@ -83,6 +84,7 @@ import {
   type PlaybackSource,
   type PlaybackState,
   type ProfilePayload,
+  type QueueItem,
   type ReactionPayload,
   type RoomMeta,
   type RoomMetaPayload,
@@ -150,6 +152,7 @@ export type RoomEvent =
   | { type: 'command'; action: PlaybackAction; from: string }
   | { type: 'correction'; action: PlaybackAction }
   | { type: 'site-url'; url: string }
+  | { type: 'queue'; items: QueueItem[]; index: number }
   | { type: 'hint'; message: string | null }
   | { type: 'chat'; message: ChatMessage }
   | { type: 'reaction'; from: string; name: string; emoji: string; x?: number; y?: number }
@@ -643,6 +646,20 @@ export class RoomClient {
     const data: SiteUrlData = { url };
     this.sendState();
     this.send('site-url', data);
+  }
+
+  /** Хост обновил очередь видео: гости видят те же названия и индекс. */
+  publishQueue(items: QueueItem[], index: number): void {
+    if (!this.selfIsHost) {
+      return;
+    }
+    const data = normalizeQueueData({ items, index });
+    if (!data) {
+      return;
+    }
+    this.send('queue', data);
+    // Поздний гость пропустит сообщение: на входе в комнату хост повторит
+    // очередь (RoomScreen шлёт publishQueue при смене состава).
   }
 
   // ---------- Модерация и настройки комнаты (этап 6) ----------
@@ -1440,6 +1457,9 @@ export class RoomClient {
         return;
       case 'site-url':
         this.handleSiteUrl(raw);
+        return;
+      case 'queue':
+        this.handleQueue(raw);
         return;
       case 'stream-start':
         this.handleStreamStart(raw);
@@ -2259,6 +2279,17 @@ export class RoomClient {
       src: { mode: 'site', url: data.url, duration: this.stateValue.src.duration },
     };
     this.emit({ type: 'site-url', url: data.url });
+  }
+
+  private handleQueue(envelope: { from: string; d: unknown }): void {
+    if (this.selfIsHost || envelope.from !== this.hostUserId) {
+      return;
+    }
+    const data = normalizeQueueData(envelope.d);
+    if (!data) {
+      return;
+    }
+    this.emit({ type: 'queue', items: data.items, index: data.index });
   }
 
   private handleStreamStart(envelope: { from: string; d: unknown }): void {

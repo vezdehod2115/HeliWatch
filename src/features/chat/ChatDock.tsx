@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from '../../app/icons';
 import type { ChatMessage } from '../../net/protocol';
 import { QUICK_REACTIONS, REACTION_LABELS } from './emoji';
@@ -57,8 +59,29 @@ export function ChatDock({
     : 'Включить голос';
   const speaker = voice.speaking.filter(Boolean);
 
+  const dockRef = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<{ right: number; bottom: number } | null>(null);
+
+  // Поповер реакций рендерится fixed над доком: absolute обрезался бы панелью
+  // и его тап-зона появлялась бы с задержкой. На открытии сразу меряем док.
+  useEffect(() => {
+    if (!reactionsOpen) {
+      setAnchor(null);
+      return;
+    }
+    const element = dockRef.current;
+    if (!element) {
+      return;
+    }
+    const rect = element.getBoundingClientRect();
+    setAnchor({
+      right: Math.max(10, window.innerWidth - rect.right),
+      bottom: Math.max(10, window.innerHeight - rect.top + 8),
+    });
+  }, [reactionsOpen]);
+
   return (
-    <div className="hw-chatdock" data-hw-region="chatdock">
+    <div className="hw-chatdock" data-hw-region="chatdock" ref={dockRef}>
       <button
         type="button"
         className={`hw-mic${voice.active ? ' is-on' : ''}${voice.muted ? ' is-muted' : ''}`}
@@ -129,29 +152,38 @@ export function ChatDock({
         <Icon name="chat" size={18} />
       </button>
 
-      {reactionsOpen ? (
-        // Свой тап-регион: поповер выходит за пределы дока, иначе его кнопки
-        // уходили бы в site-WebView.
-        <div
-          className="hw-reactionbar"
-          data-hw-region="reactions"
-          role="group"
-          aria-label="Быстрые реакции"
-        >
-          {QUICK_REACTIONS.map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              className="hw-reactionbtn"
-              onClick={() => onReaction(emoji)}
-              title={REACTION_LABELS[emoji] ?? emoji}
-              aria-label={REACTION_LABELS[emoji] ?? emoji}
+      {reactionsOpen
+        ? createPortal(
+            // Свой тап-регион. Портал обязателен: у дока backdrop-filter,
+            // который превращается в containing block для fixed-потомков, и
+            // поповер уезжал бы в середину экрана.
+            <div
+              className="hw-reactionbar"
+              data-hw-region="reactions"
+              role="group"
+              aria-label="Быстрые реакции"
+              style={
+                anchor
+                  ? { position: 'fixed', right: anchor.right, bottom: anchor.bottom }
+                  : { position: 'fixed', right: 12, bottom: 12 }
+              }
             >
-              {emoji}
-            </button>
-          ))}
-        </div>
-      ) : null}
+              {QUICK_REACTIONS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  className="hw-reactionbtn"
+                  onClick={() => onReaction(emoji)}
+                  title={REACTION_LABELS[emoji] ?? emoji}
+                  aria-label={REACTION_LABELS[emoji] ?? emoji}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

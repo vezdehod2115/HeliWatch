@@ -42,4 +42,16 @@ class MainActivity : TauriActivity() {
     HeliWatchBridge.onPictureInPictureModeChanged(isInPictureInPictureMode)
   }
   // HW:PATCH:PIP:END
+
+  // HW:PATCH:LIFECYCLE:BEGIN
+  override fun onPause() {
+    super.onPause()
+    HeliWatchBridge.onActivityPauseAfterSuper()
+  }
+
+  override fun onStop() {
+    super.onStop()
+    HeliWatchBridge.onActivityStopAfterSuper()
+  }
+  // HW:PATCH:LIFECYCLE:END
 }

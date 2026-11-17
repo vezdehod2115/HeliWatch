@@ -13,7 +13,13 @@ interface DebugZonesProps {
  */
 export function DebugZones({ payload, tap, onClose }: DebugZonesProps) {
   return (
-    <div className="hw-zones" role="dialog" aria-modal="true" aria-label="Зоны касания">
+    <div
+      className="hw-zones"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Зоны касания"
+      data-hw-block
+    >
       {payload?.regions.map((region) => (
         <div
           key={region.id}

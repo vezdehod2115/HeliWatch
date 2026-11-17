@@ -12,6 +12,8 @@ export interface VideoInfo {
   /** Размер кадра: пропорции окна PiP (этап 4). */
   width: number;
   height: number;
+  /** URL видео (currentSrc): используется очередью и окном комнаты. */
+  src: string;
 }
 
 export interface SiteNotice {
@@ -94,6 +96,7 @@ export const EMPTY_STATUS: SiteStatus = {
     muted: false,
     width: 0,
     height: 0,
+    src: '',
   },
   fullscreen: false,
   lastTap: null,

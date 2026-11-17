@@ -25,7 +25,11 @@ export type IconName =
   | 'lock'
   | 'door'
   | 'crown'
-  | 'settings';
+  | 'settings'
+  | 'search'
+  | 'list'
+  | 'plus'
+  | 'trash';
 
 interface IconProps {
   name: IconName;
@@ -240,6 +244,33 @@ export function Icon({ name, size = 20 }: IconProps) {
         <svg {...common}>
           <circle cx="12" cy="12" r="3.2" />
           <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18" />
+        </svg>
+      );
+    case 'search':
+      return (
+        <svg {...common}>
+          <circle cx="11" cy="11" r="6.4" />
+          <path d="m16 16 4.2 4.2" />
+        </svg>
+      );
+    case 'list':
+      return (
+        <svg {...common}>
+          <path d="M4 6h.01M4 12h.01M4 18h.01" />
+          <path d="M8 6h12M8 12h12M8 18h12" />
+        </svg>
+      );
+    case 'plus':
+      return (
+        <svg {...common}>
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      );
+    case 'trash':
+      return (
+        <svg {...common}>
+          <path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13" />
+          <path d="M10 11v5M14 11v5" />
         </svg>
       );
     default:

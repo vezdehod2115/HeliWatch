@@ -193,6 +193,20 @@ async function checkMainActivity() {
     content.includes('override fun onPictureInPictureModeChanged(') &&
       content.includes('HeliWatchBridge.onPictureInPictureModeChanged('),
   );
+  check(
+    'маркеры HW:PATCH:LIFECYCLE',
+    content.includes('// HW:PATCH:LIFECYCLE:BEGIN') &&
+      content.includes('// HW:PATCH:LIFECYCLE:END'),
+  );
+  check(
+    'onPause после super будит WebView (этап 8)',
+    content.includes('HeliWatchBridge.onActivityPauseAfterSuper()'),
+    'без этого Tauri-WebView замирает в PiP/фоне',
+  );
+  check(
+    'onStop после super будит WebView (этап 8)',
+    content.includes('HeliWatchBridge.onActivityStopAfterSuper()'),
+  );
 }
 
 async function checkResources() {
@@ -344,6 +358,31 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
     'PiP: вход только при активной комнате',
     pip?.includes('SessionState.roomActive') ?? false,
   );
+  check(
+    'PiP: параметры ставятся из UI-потока (этап 8)',
+    pip?.includes('runOnUiThread') ?? false,
+    'из JNI-потока setPictureInPictureParams молча не применялся',
+  );
+  check(
+    'PiP: автовход включён в параметрах окна',
+    pip?.includes('setAutoEnterEnabled(autoEnterEnabled())') ?? false,
+  );
+
+  const bridge = await readOptional(
+    path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/HeliWatchBridge.kt'),
+  );
+  check(
+    'пикер фото не усыпляет комнату (этап 8)',
+    bridge?.includes('fileChooserOpen') ?? false,
+  );
+  check(
+    'возврат из фона возобновляет видео (этап 8)',
+    bridge?.includes('resume-playback') ?? false,
+  );
+  check(
+    'пробуждение WebView после super.onPause (этап 8)',
+    bridge?.includes('onActivityPauseAfterSuper') ?? false,
+  );
 
   const service = await readOptional(
     path.join(pluginRoot, 'android/src/main/java/dev/heliwatch/SessionService.kt'),
@@ -388,6 +427,10 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
     'контейнер: WebView добавляются в attach, а не в конструкторе',
     !/init\s*\{[\s\S]*?addView\(\s*(siteWebView|tauriWebView)/.test(container ?? ''),
     'иначе Tauri-WebView с родителем даёт JNI abort',
+  );
+  check(
+    'контейнер: в PiP React-слой скрывается для режима «Сайт» (этап 8)',
+    container?.includes('keepReact') ?? false,
   );
 }
 

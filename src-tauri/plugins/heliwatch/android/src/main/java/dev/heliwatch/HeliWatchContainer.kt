@@ -97,9 +97,22 @@ class HeliWatchContainer(
     }
   }
 
-  fun setPipMode(on: Boolean) {
+  /**
+   * PiP: касания гасятся, React-слой можно временно убрать.
+   *
+   * В режиме «Сайт» видео показывает нативный WebView — прозрачный React поверх
+   * него в маленьком окне бесполезен и заставляет композитор перерисовывать два
+   * полноэкранных слоя. Для режимов файла/эфира видео живёт в React, поэтому
+   * `keepReact = true` там обязателен.
+   */
+  fun setPipMode(on: Boolean, keepReact: Boolean = true) {
     pipMode = on
     gestureTarget = null
+    if (fullscreenView != null) {
+      return
+    }
+    siteWebView.visibility = View.VISIBLE
+    tauriWebView.visibility = if (on && !keepReact) View.GONE else View.VISIBLE
   }
 
   fun showFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {

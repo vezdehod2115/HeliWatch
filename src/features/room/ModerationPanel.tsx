@@ -68,7 +68,14 @@ export function ModerationPanel({
   }
 
   return (
-    <div className="hw-modal" role="dialog" aria-modal="true" aria-label="Участники комнаты">
+    <div
+      className="hw-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Участники комнаты"
+      data-hw-region="moderation"
+      data-hw-block
+    >
       <div className="hw-modal-card hw-moderation">
         <header className="hw-modal-head">
           <Icon name="users" size={18} />

@@ -179,6 +179,13 @@ export function HomeScreen({
         </header>
 
         <nav className="hw-navgrid" aria-label="Разделы">
+          <button type="button" className="hw-navbtn" onClick={onOpenProfile}>
+            <Icon name="users" size={20} />
+            <span>
+              <strong>Профиль</strong>
+              <small>{profile.displayName}</small>
+            </span>
+          </button>
           <button type="button" className="hw-navbtn" onClick={onOpenFriends}>
             <Icon name="users" size={20} />
             <span>
@@ -209,13 +216,6 @@ export function HomeScreen({
             <span>
               <strong>Настройки</strong>
               <small>акцент, TURN, бэкап</small>
-            </span>
-          </button>
-          <button type="button" className="hw-navbtn" onClick={onOpenProfile}>
-            <Icon name="users" size={20} />
-            <span>
-              <strong>Профиль</strong>
-              <small>{profile.displayName}</small>
             </span>
           </button>
         </nav>

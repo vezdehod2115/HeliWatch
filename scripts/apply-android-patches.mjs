@@ -311,6 +311,33 @@ async function patchMainActivity() {
     if (!next.includes('HeliWatchBridge.onPictureInPictureModeChanged(')) {
       throw new Error('не удалось вставить onPictureInPictureModeChanged() в MainActivity.kt');
     }
+
+    // Этап 8: WryActivity.onPause() усыпляет Tauri-WebView ПОСЛЕ колбэка плагина,
+    // поэтому «будильник» TimerGuard внутри onPause не работает: React замирает,
+    // видео в PiP/фоне стоит, приложение выглядит зависшим. Повторяем пробуждение
+    // уже после super.onPause()/super.onStop().
+    const lifecycleBlock = `  // HW:PATCH:LIFECYCLE:BEGIN
+  override fun onPause() {
+    super.onPause()
+    HeliWatchBridge.onActivityPauseAfterSuper()
+  }
+
+  override fun onStop() {
+    super.onStop()
+    HeliWatchBridge.onActivityStopAfterSuper()
+  }
+  // HW:PATCH:LIFECYCLE:END`;
+    if (/^[ \t]*\/\/ HW:PATCH:LIFECYCLE:BEGIN[\s\S]*?\/\/ HW:PATCH:LIFECYCLE:END/m.test(next)) {
+      next = next.replace(
+        /^[ \t]*\/\/ HW:PATCH:LIFECYCLE:BEGIN[\s\S]*?\/\/ HW:PATCH:LIFECYCLE:END/m,
+        lifecycleBlock,
+      );
+    } else {
+      next = next.replace(/\n}\s*$/, `\n\n${lifecycleBlock}\n}\n`);
+    }
+    if (!next.includes('HeliWatchBridge.onActivityPauseAfterSuper()')) {
+      throw new Error('не удалось вставить onPause()-обвязку в MainActivity.kt');
+    }
     return next;
   });
 }

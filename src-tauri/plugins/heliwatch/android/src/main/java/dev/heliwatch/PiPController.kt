@@ -7,11 +7,14 @@ import android.content.Intent
 import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.os.Looper
 import android.util.Log
 import android.util.Rational
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
 import app.tauri.plugin.JSObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * PiP для двух WebView.
@@ -20,6 +23,11 @@ import app.tauri.plugin.JSObject
  * `videoWidth/videoHeight`), действия — пауза/плей, микрофон, «развернуть».
  * На Android 12+ вход делает система (`setAutoEnterEnabled`), на 11 и ниже —
  * `onUserLeaveHint()`. Вход разрешён только при активной комнате.
+ *
+ * Все обращения к Activity идут в UI-поток: команды Tauri приходят из JNI-потока,
+ * а `setPictureInPictureParams`/`enterPictureInPictureMode` можно звать только
+ * из main. Иначе параметры молча не применялись и автовход «свайпом вверх»,
+ * как в YouTube, не срабатывал.
  */
 class PiPController(
   private val activity: AppCompatActivity,
@@ -32,6 +40,8 @@ class PiPController(
   /** Последняя причина отказа: показывается в UI, если PiP недоступен. */
   var lastError: String? = null
     private set
+
+  private var lastAutoEnter = false
 
   fun update(state: JSObject?) {
     if (state == null) {
@@ -50,6 +60,9 @@ class PiPController(
     if (state.has("roomActive")) {
       SessionState.roomActive = state.optBoolean("roomActive", SessionState.roomActive)
     }
+    if (state.has("pipEnabled")) {
+      SessionState.pipEnabled = state.optBoolean("pipEnabled", SessionState.pipEnabled)
+    }
     apply()
   }
 
@@ -61,9 +74,12 @@ class PiPController(
     if (activity.isFinishing || activity.isDestroyed) {
       return
     }
-    runCatching {
-      activity.setPictureInPictureParams(buildParams())
-    }.onFailure { Log.w(TAG, "setPictureInPictureParams", it) }
+    onUi {
+      runCatching {
+        activity.setPictureInPictureParams(buildParams())
+        lastAutoEnter = autoEnterEnabled()
+      }.onFailure { Log.w(TAG, "setPictureInPictureParams", it) }
+    }
   }
 
   /** Ручной вход из кнопки в панели комнаты. */
@@ -86,13 +102,16 @@ class PiPController(
     if (activity.isFinishing || activity.isDestroyed) {
       return false
     }
-    apply()
-    return runCatching {
-      activity.enterPictureInPictureMode(buildParams())
-    }.onFailure { error ->
-      Log.w(TAG, "enterPictureInPictureMode", error)
-      lastError = "Устройство не поддержало PiP: ${error.message ?: "ошибка"}"
-    }.getOrDefault(false)
+    return runOnMain {
+      runCatching {
+        // Свежие параметры обязательны: система входит в PiP именно с ними.
+        activity.setPictureInPictureParams(buildParams())
+        activity.enterPictureInPictureMode(buildParams())
+      }.onFailure { error ->
+        Log.w(TAG, "enterPictureInPictureMode", error)
+        lastError = "Устройство не поддержало PiP: ${error.message ?: "ошибка"}"
+      }.getOrDefault(false)
+    }
   }
 
   /**
@@ -103,10 +122,15 @@ class PiPController(
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
       return
     }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    if (!SessionState.roomActive || !SessionState.pipEnabled || isInPip) {
       return
     }
-    if (!SessionState.roomActive || !SessionState.pipEnabled || isInPip) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      // «Свайп домой» на 12+ отдаёт вход системе; но если автовход почему-то
+      // не включён (команда из JS пришла позже), включаем его перед уходом.
+      if (!lastAutoEnter) {
+        apply()
+      }
       return
     }
     enter()
@@ -115,8 +139,8 @@ class PiPController(
   fun onModeChanged(inPip: Boolean) {
     isInPip = inPip
     SessionState.pipActive = inPip
-    apply()
     onModeChanged(inPip)
+    apply()
   }
 
   /**
@@ -144,19 +168,25 @@ class PiPController(
   fun release() {
     SessionState.pipActive = false
     isInPip = false
+    lastAutoEnter = false
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !activity.isFinishing) {
-      runCatching {
-        activity.setPictureInPictureParams(
-          PictureInPictureParams.Builder()
-            .setAutoEnterEnabled(false)
-            .setActions(emptyList())
-            .build(),
-        )
+      onUi {
+        runCatching {
+          activity.setPictureInPictureParams(
+            PictureInPictureParams.Builder()
+              .setAutoEnterEnabled(false)
+              .setActions(emptyList())
+              .build(),
+          )
+        }
       }
     }
   }
 
   // ---------- Внутреннее ----------
+
+  private fun autoEnterEnabled(): Boolean =
+    SessionState.roomActive && SessionState.pipEnabled
 
   private fun buildParams(): PictureInPictureParams {
     val builder = PictureInPictureParams.Builder()
@@ -168,7 +198,7 @@ class PiPController(
     }
     builder.setActions(buildActions())
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      builder.setAutoEnterEnabled(SessionState.roomActive && SessionState.pipEnabled)
+      builder.setAutoEnterEnabled(autoEnterEnabled())
       builder.setSeamlessResizeEnabled(false)
     }
     return builder.build()
@@ -223,8 +253,8 @@ class PiPController(
     actions.add(
       remoteAction(
         icon = if (SessionState.micOn) R.drawable.hw_ic_mic else R.drawable.hw_ic_mic_off,
-        title = if (SessionState.micOn) "Выключить микрофон" else "Включить микрофон",
         action = MediaActionReceiver.ACTION_MIC,
+        title = if (SessionState.micOn) "Выключить микрофон" else "Включить микрофон",
         requestCode = REQUEST_MIC,
       ),
     )
@@ -264,10 +294,41 @@ class PiPController(
     return PendingIntent.getActivity(activity, REQUEST_EXPAND, launch, flags)
   }
 
+  /** Выполнить на UI-потоке; если уже там — сразу. */
+  private fun onUi(block: () -> Unit) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      block()
+      return
+    }
+    activity.runOnUiThread { runCatching(block) }
+  }
+
+  /** Синхронный вариант для команды `pip_enter`, которая должна вернуть ok/error. */
+  private fun runOnMain(block: () -> Boolean): Boolean {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      return block()
+    }
+    var result = false
+    val latch = CountDownLatch(1)
+    activity.runOnUiThread {
+      try {
+        result = block()
+      } finally {
+        latch.countDown()
+      }
+    }
+    if (!latch.await(ENTER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+      lastError = "Система не ответила на запрос PiP"
+      return false
+    }
+    return result
+  }
+
   companion object {
     private const val TAG = "HeliWatch"
     private const val REQUEST_TOGGLE = 4311
     private const val REQUEST_MIC = 4312
     private const val REQUEST_EXPAND = 4313
+    private const val ENTER_TIMEOUT_MS = 3000L
   }
 }
