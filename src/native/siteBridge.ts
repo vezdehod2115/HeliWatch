@@ -23,11 +23,24 @@ export async function navigateSite(action: NavAction): Promise<void> {
   await callPlugin('site_nav', { action });
 }
 
-/** Команда в page-hook: play/pause/seek/setRate/probe. */
+/** Команда в page-hook: play/pause/seek/setRate/setVolume/probe. */
 export async function sendSiteCommand(
   cmd: Record<string, unknown>,
 ): Promise<void> {
   await callPlugin('site_cmd', { cmd });
+}
+
+/**
+ * Перехват системного «назад» для оверлеев React (§ этап 3): пока панель чата
+ * открыта, back не уходит в историю сайта, а присылает событие `back-overlay`.
+ */
+export async function captureBack(on: boolean): Promise<void> {
+  await navigateSite(on ? 'back-capture-on' : 'back-capture-off');
+}
+
+/** Громкость видео сайта 0…1: используется ducking'ом при голосе. */
+export async function setSiteVolume(volume: number): Promise<void> {
+  await callPlugin('site_cmd', { cmd: { cmd: 'setVolume', volume } });
 }
 
 /** Прямоугольники React-слоя для роутинга касаний. */

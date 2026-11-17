@@ -6,6 +6,16 @@
 import { executeSql, selectRows } from '../index';
 import type { SettingRow } from '../migrations';
 
+/** Ключи настроек этапа 3 (§5, `settings`). */
+export const SETTINGS_KEYS = {
+  /** Сохранять историю чата комнаты в SQLite (по умолчанию выключено). */
+  chatHistory: 'chat.saveHistory',
+  /** Приглушать звук видео, пока кто-то говорит (по умолчанию включено). */
+  voiceDucking: 'voice.ducking',
+  /** Недавние эмодзи — сверху панели. */
+  emojiRecent: 'chat.emojiRecent',
+} as const;
+
 export async function readSetting<T>(key: string, fallback: T): Promise<T> {
   const rows = await selectRows<SettingRow>(
     'SELECT key, value_json FROM settings WHERE key = $1',

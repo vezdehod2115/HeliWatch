@@ -1,7 +1,9 @@
 /*
  * trystero 0.26.0 (pin из §2.7 плана).
  *
- * Один JSON-action `hw` на комнату; вся криптография — своя, в identity.ts.
+ * JSON-action `hw` — сообщения комнаты, бинарный `hw-blob` — чанки фото (§4.1).
+ * Голос: микрофон уходит MediaStream-треком, вкл/выкл — `sender.replaceTrack`
+ * без renegotiation (§4.6). Вся криптография — своя, в identity.ts.
  * Стратегии сигналинга по §4.8: nostr → mqtt → torrent. В 0.26 подпути
  * `trystero/mqtt` и `trystero/torrent` превратились в пустые заглушки,
  * поэтому стратегии берём из пакетов `@trystero-p2p/*` той же версии.
@@ -55,19 +57,23 @@ const ROOM_CONFIG: JoinRoomConfig = {
   },
 };
 
+type ActionLike = {
+  send: (data: JsonValue, options?: { target?: string }) => Promise<void>;
+  onMessage: ((data: unknown, context: { peerId: string }) => void) | null;
+};
+
 type StrategyModule = {
   joinRoom: (config: JoinRoomConfig, roomId: string) => RoomLike;
   selfId: string;
 };
 
 type RoomLike = {
-  makeAction: (namespace: string) => {
-    send: (data: JsonValue, options?: { target?: string }) => Promise<void>;
-    onMessage: ((data: unknown, context: { peerId: string }) => void) | null;
-  };
+  makeAction: (namespace: string) => ActionLike;
   onPeerJoin: ((peerId: string) => void) | null;
   onPeerLeave: ((peerId: string) => void) | null;
-  getPeers: () => Record<string, unknown>;
+  onPeerStream: ((stream: MediaStream, peerId: string, metadata?: unknown) => void) | null;
+  getPeers: () => Record<string, RTCPeerConnection>;
+  addStream: (stream: MediaStream, options?: { target?: string }) => Promise<void>[];
   leave: () => Promise<void>;
 };
 
@@ -129,13 +135,18 @@ class TrysteroChannel implements Channel {
   onPeerJoin: ((peerId: string) => void) | null = null;
   onPeerLeave: ((peerId: string) => void) | null = null;
   onMessage: ((data: unknown, peerId: string) => void) | null = null;
+  onBlobMessage: ((data: unknown, peerId: string) => void) | null = null;
+  onPeerStream: ((stream: MediaStream, peerId: string) => void) | null = null;
 
   private readonly room: RoomLike;
   private readonly getRelaySockets?: RelayGetter;
-  private readonly action: {
-    send: (data: JsonValue, options?: { target?: string }) => Promise<void>;
-    onMessage: ((data: unknown, context: { peerId: string }) => void) | null;
-  };
+  private readonly action: ActionLike;
+  private readonly blobAction: ActionLike;
+  private micTrack: MediaStreamTrack | null = null;
+  private micStream: MediaStream | null = null;
+  private micMuted = false;
+  /** Sender'ы микрофона по пирам: нужны, когда трек снят через replaceTrack(null). */
+  private readonly micSenders = new Map<string, RTCRtpSender>();
   private closed = false;
 
   constructor(
@@ -157,14 +168,33 @@ class TrysteroChannel implements Channel {
       }
     };
 
-    room.onPeerJoin = (peerId) => {
+    const blobAction = room.makeAction('hw-blob');
+    this.blobAction = blobAction;
+    blobAction.onMessage = (data, context) => {
       if (!this.closed) {
-        this.onPeerJoin?.(peerId);
+        this.onBlobMessage?.(data, context.peerId);
       }
     };
+
+    room.onPeerJoin = (peerId) => {
+      if (this.closed) {
+        return;
+      }
+      // Поздно подключившемуся пиру микрофон нужен без повторного getUserMedia.
+      if (this.micTrack) {
+        this.sendMicTo(peerId);
+      }
+      this.onPeerJoin?.(peerId);
+    };
     room.onPeerLeave = (peerId) => {
+      this.micSenders.delete(peerId);
       if (!this.closed) {
         this.onPeerLeave?.(peerId);
+      }
+    };
+    room.onPeerStream = (stream, peerId) => {
+      if (!this.closed) {
+        this.onPeerStream?.(stream, peerId);
       }
     };
   }
@@ -178,6 +208,62 @@ class TrysteroChannel implements Channel {
       .catch((error: unknown) => {
         console.warn('[heliwatch] не удалось отправить сообщение', error);
       });
+  }
+
+  sendBlob(data: ArrayBuffer, to?: string): void {
+    if (this.closed) {
+      return;
+    }
+    void this.blobAction
+      .send(data as unknown as JsonValue, to ? { target: to } : undefined)
+      .catch((error: unknown) => {
+        console.warn('[heliwatch] не удалось отправить чанк фото', error);
+      });
+  }
+
+  addStream(stream: MediaStream): void {
+    if (this.closed) {
+      return;
+    }
+    const track = stream.getAudioTracks()[0] ?? null;
+    if (!track) {
+      return;
+    }
+    this.micTrack = track;
+    this.micStream = stream;
+    this.micMuted = !track.enabled;
+    try {
+      // Первое включение микрофона: одна renegotiation на соединение (§4.6).
+      const pending = this.room.addStream(stream);
+      void Promise.all(pending)
+        .then(() => {
+          if (this.closed) {
+            return;
+          }
+          this.indexMicSenders();
+          if (this.micMuted) {
+            this.applyMicMuted(true);
+          }
+        })
+        .catch((error: unknown) => {
+          console.warn('[heliwatch] не удалось добавить микрофон', error);
+        });
+    } catch (error) {
+      console.warn('[heliwatch] addStream упал', error);
+      return;
+    }
+  }
+
+  setMicMuted(track: MediaStreamTrack, muted: boolean): void {
+    if (this.closed) {
+      return;
+    }
+    if (!this.micTrack) {
+      this.micTrack = track;
+    }
+    this.micMuted = muted;
+    this.indexMicSenders();
+    this.applyMicMuted(muted);
   }
 
   knownPeers(): string[] {
@@ -203,7 +289,101 @@ class TrysteroChannel implements Channel {
     this.onPeerJoin = null;
     this.onPeerLeave = null;
     this.onMessage = null;
+    this.onBlobMessage = null;
+    this.onPeerStream = null;
+    this.micTrack = null;
+    this.micStream = null;
+    this.micSenders.clear();
     void this.room.leave().catch(() => undefined);
+  }
+
+  // ---------- Микрофон ----------
+
+  private indexMicSenders(): void {
+    if (!this.micTrack) {
+      return;
+    }
+    try {
+      for (const [peerId, pc] of this.peerConnections()) {
+        const sender = pc.getSenders().find((item) => item.track === this.micTrack);
+        if (sender) {
+          this.micSenders.set(peerId, sender);
+        }
+      }
+    } catch (error) {
+      console.warn('[heliwatch] не удалось найти sender микрофона', error);
+    }
+  }
+
+  private applyMicMuted(muted: boolean): void {
+    const track = this.micTrack;
+    if (!track) {
+      return;
+    }
+    for (const [peerId, pc] of this.peerConnections()) {
+      const sender = this.micSenderFor(peerId, pc);
+      if (!sender) {
+        continue;
+      }
+      // replaceTrack(null) — тишина без renegotiation; обратно — тот же трек.
+      void Promise.resolve(sender.replaceTrack(muted ? null : track)).catch((error: unknown) => {
+        console.warn('[heliwatch] replaceTrack микрофона не сработал', error);
+      });
+    }
+  }
+
+  private micSenderFor(peerId: string, pc: RTCPeerConnection): RTCRtpSender | null {
+    const cached = this.micSenders.get(peerId);
+    if (cached) {
+      return cached;
+    }
+    try {
+      const senders = pc.getSenders();
+      const sender =
+        senders.find((item) => item.track === this.micTrack) ??
+        senders.find((item) => item.track?.kind === 'audio') ??
+        null;
+      if (sender) {
+        this.micSenders.set(peerId, sender);
+      }
+      return sender;
+    } catch {
+      return null;
+    }
+  }
+
+  private sendMicTo(peerId: string): void {
+    const stream = this.micStream;
+    if (!stream) {
+      return;
+    }
+    try {
+      // Поздний пир получает микрофон своим addStream — в рамках его соединения.
+      const pending = this.room.addStream(stream, { target: peerId });
+      void Promise.all(pending)
+        .then(() => {
+          if (this.closed) {
+            return;
+          }
+          this.indexMicSenders();
+          if (this.micMuted) {
+            this.applyMicMuted(true);
+          }
+        })
+        .catch((error: unknown) => {
+          console.warn('[heliwatch] микрофон для нового пира не добавлен', error);
+        });
+    } catch (error) {
+      console.warn('[heliwatch] getPeers недоступен', error);
+    }
+  }
+
+  private peerConnections(): Array<[string, RTCPeerConnection]> {
+    try {
+      return Object.entries(this.room.getPeers());
+    } catch {
+      return [];
+    }
   }
 }
 

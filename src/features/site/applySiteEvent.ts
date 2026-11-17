@@ -131,6 +131,12 @@ export function applySiteEvent(state: SiteStatus, event: SiteEvent): SiteStatus 
         ...state,
         backRootAt: state.backRootAt + 1,
       };
+    case 'back-overlay':
+      // Панель React (чат/эмодзи/фото) сама решает, что закрыть.
+      return {
+        ...state,
+        backOverlayAt: state.backOverlayAt + 1,
+      };
     case 'error':
       return {
         ...state,

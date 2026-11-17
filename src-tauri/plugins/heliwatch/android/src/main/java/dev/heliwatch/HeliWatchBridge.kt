@@ -45,6 +45,7 @@ object HeliWatchBridge {
   private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
   private var backCallback: OnBackPressedCallback? = null
   private var backArmedUntil = 0L
+  private var backCaptured = false
   private val deepLinkPattern = Regex("""heliwatch://(?:r/)?([0-9A-Za-z]{6})""", RegexOption.IGNORE_CASE)
 
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -166,6 +167,15 @@ object HeliWatchBridge {
   }
 
   fun navigate(action: String) {
+    // React открыл панель (чат/эмодзи/фото): системный back сначала закрывает её.
+    if (action == "back-capture-on") {
+      backCaptured = true
+      return
+    }
+    if (action == "back-capture-off") {
+      backCaptured = false
+      return
+    }
     val site = siteRef ?: return
     when (action) {
       "back" -> if (site.canGoBack()) site.goBack()
@@ -352,6 +362,13 @@ object HeliWatchBridge {
     backCallback?.remove()
     val callback = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
+        if (backCaptured) {
+          // Панель React открыта: отдаём back ей, историю сайта не трогаем.
+          emitEvent(JSObject().apply {
+            put("t", "back-overlay")
+          })
+          return
+        }
         val site = siteRef
         if (site != null && site.canGoBack()) {
           site.goBack()

@@ -15,6 +15,8 @@ export interface LocalPlayerHandle {
   sample: () => PlaybackSample;
   seekTo: (time: number) => void;
   duration: () => number;
+  /** Громкость 0…1: ducking приглушает локальный файл, пока кто-то говорит. */
+  setVolume: (volume: number) => void;
 }
 
 interface LocalPlayerProps {
@@ -115,6 +117,12 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
         sample: currentSample,
         seekTo: (time) => applyNow({ kind: 'seek', t: time }),
         duration: () => currentSample().duration,
+        setVolume: (volume) => {
+          const video = videoRef.current;
+          if (video) {
+            video.volume = Math.min(1, Math.max(0, volume));
+          }
+        },
       }),
       [],
     );

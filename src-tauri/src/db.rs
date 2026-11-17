@@ -2,7 +2,8 @@
 //!
 //! Схема соответствует `src/db/migrations.ts` и §5 плана. Миграции живут в
 //! Rust, чтобы применяться один раз при `Database.load()` на любом устройстве.
-//! Этап 2 создаёт только profile/keys/settings/recent_rooms; таблицы друзей,
+//! Этап 2 создал profile/keys/settings/recent_rooms, этап 3 добавляет room_chat
+//! (история чата комнаты — только по желанию пользователя). Таблицы друзей,
 //! DM, сессий и статистики добавят следующие этапы отдельными версиями.
 
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -10,10 +11,11 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 pub const DB_URL: &str = "sqlite:heliwatch.db";
 
 pub fn migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "profile, keys, settings, recent_rooms",
-        sql: r#"
+    vec![
+        Migration {
+            version: 1,
+            description: "profile, keys, settings, recent_rooms",
+            sql: r#"
 CREATE TABLE IF NOT EXISTS profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     user_id TEXT NOT NULL,
@@ -43,6 +45,27 @@ CREATE TABLE IF NOT EXISTS recent_rooms (
 
 CREATE INDEX IF NOT EXISTS idx_recent_rooms_at ON recent_rooms (last_join_at DESC);
 "#,
-        kind: MigrationKind::Up,
-    }]
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "room_chat — история чата комнаты (по желанию)",
+            sql: r#"
+CREATE TABLE IF NOT EXISTS room_chat (
+    id TEXT PRIMARY KEY,
+    room_code TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    from_user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
+    body TEXT NOT NULL DEFAULT '',
+    image_path TEXT,
+    saved INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_chat_room_ts ON room_chat (room_code, ts);
+CREATE INDEX IF NOT EXISTS idx_room_chat_ts ON room_chat (ts);
+"#,
+            kind: MigrationKind::Up,
+        },
+    ]
 }

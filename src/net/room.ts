@@ -14,22 +14,34 @@ import {
 import type { Identity } from './identity';
 import { publicKeyMatchesUserId, signEnvelope, verifyEnvelope } from './identity';
 import {
+  CHAT_MAX_LENGTH,
+  CHAT_MIN_GAP_MS,
   PROTOCOL_VERSION,
   ROOM_LIMIT_DEFAULT,
   ROOM_LIMIT_MAX,
   createEnvelope,
   createNonce,
+  createUlid,
+  isChatPayload,
+  isEmojiSequence,
   isEnvelope,
+  isImageCancelPayload,
+  isImageEndPayload,
   isNonceFresh,
+  isReactionPayload,
   isStateRefresh,
+  isTypingPayload,
   isValidState,
+  normalizeChatText,
   normalizeRoomCode,
   sampleFromState,
   shouldApplyState,
   stateFromSample,
   type ByeData,
+  type ChatMessage,
   type Envelope,
   type HelloData,
+  type ImageScope,
   type JoinData,
   type MemberInfo,
   type PlaybackAction,
@@ -37,14 +49,23 @@ import {
   type PlaybackSource,
   type PlaybackState,
   type ProfilePayload,
+  type ReactionPayload,
   type RoomMeta,
   type RoomMode,
   type RoomRole,
   type SiteUrlData,
   type StateVersion,
+  type TypingPayload,
   type WelcomeData,
 } from './protocol';
 import type { Channel } from './transport';
+import {
+  ImageReceiver,
+  sendImage,
+  type BlobTransport,
+  type ImageTransferInfo,
+  type SendImageResult,
+} from './blobs';
 import { STRATEGIES, type StrategyId } from './trystero';
 
 export type RoomPhase =
@@ -71,6 +92,25 @@ export type RoomEvent =
   | { type: 'correction'; action: PlaybackAction }
   | { type: 'site-url'; url: string }
   | { type: 'hint'; message: string | null }
+  | { type: 'chat'; message: ChatMessage }
+  | { type: 'reaction'; from: string; name: string; emoji: string; x?: number; y?: number }
+  | { type: 'typing'; from: string; name: string; on: boolean }
+  | { type: 'image-start'; info: ImageTransferInfo }
+  | { type: 'image-progress'; info: ImageTransferInfo }
+  | {
+      type: 'image';
+      id: string;
+      from: string;
+      name: string;
+      color: string;
+      mime: string;
+      w: number;
+      h: number;
+      ts: number;
+      bytes: Uint8Array;
+    }
+  | { type: 'image-error'; id: string; reason: string }
+  | { type: 'voice-stream'; peerId: string; userId: string | null; stream: MediaStream }
   | { type: 'peer-left'; peerId: string; userId?: string }
   | { type: 'debug'; peers: number; seq: number; driverId: string | null }
   | { type: 'error'; message: string }
@@ -106,6 +146,8 @@ interface PeerAuth {
   profile?: ProfilePayload;
   joinedAt?: number;
   limiter: CommandRateLimiter;
+  /** Чат и реакции: защита от флуда от одного пира. */
+  chatLimiter: CommandRateLimiter;
 }
 
 const MAX_SEEN_IDS = 128;
@@ -115,6 +157,11 @@ const HEARTBEAT_MS = 5000;
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 60_000;
 const CONNECT_HINT_MS = 12_000;
+/** Чат и реакции: 12 сообщений за 5 секунд от одного пира — предел. */
+const SOCIAL_MESSAGES_PER_WINDOW = 12;
+const SOCIAL_WINDOW_MS = 5000;
+/** Пауза между своими сообщениями: защита от случайного даблтапа (§4.7). */
+const SELF_CHAT_GAP_MS = CHAT_MIN_GAP_MS;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -221,6 +268,14 @@ export class RoomClient {
   private lastLocal: PlaybackSample | null = null;
   private lastCorrectionAt = 0;
   private relayCount = 0;
+  /** Микрофон комнаты: переиспользуется при реконнекте без getUserMedia. */
+  private voiceStream: MediaStream | null = null;
+  private micMutedValue = false;
+  private lastChatAt = 0;
+  private lastTypingAt = 0;
+  /** Отменённые пользователем исходящие фото. */
+  private readonly cancelledImages = new Set<string>();
+  private readonly images: ImageReceiver;
 
   constructor(options: RoomClientOptions) {
     const code = normalizeRoomCode(options.code);
@@ -259,6 +314,29 @@ export class RoomClient {
       by: this.selfUserId,
     };
     this.version = { seq: 0, by: this.selfUserId };
+    this.images = new ImageReceiver({
+      onStart: (info) => this.emit({ type: 'image-start', info }),
+      onProgress: (info) => this.emit({ type: 'image-progress', info }),
+      onComplete: (image) => {
+        const peer = this.peers.get(image.fromPeer);
+        const userId = peer?.userId ?? '';
+        const member = userId ? this.members.get(userId) : undefined;
+        this.emit({
+          type: 'image',
+          id: image.id,
+          from: userId,
+          name: member?.name ?? peer?.profile?.name ?? 'Друг',
+          color: member?.color ?? peer?.profile?.color ?? '#6ff0c4',
+          mime: image.mime,
+          w: image.w,
+          h: image.h,
+          ts: this.now(),
+          bytes: image.bytes,
+        });
+      },
+      onError: ({ id, reason }) => this.emit({ type: 'image-error', id, reason }),
+      onReject: (id, peerId, reason) => this.send('image-cancel', { id, reason }, peerId),
+    });
   }
 
   // ---------- Публичное состояние ----------
@@ -324,6 +402,7 @@ export class RoomClient {
       // Даём DataChannel пару миллисекунд, чтобы bye ушёл до leave().
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
+    this.images.dispose();
     this.disposeChannel();
     this.setPhase('closed');
     this.emit({ type: 'closed', reason });
@@ -417,6 +496,150 @@ export class RoomClient {
     this.applyCorrection();
   }
 
+  // ---------- Чат, реакции, фото (§4.3, §4.7) ----------
+
+  /**
+   * Отправить сообщение в чат комнаты. Возвращает готовую запись для UI или
+   * null, если текст пустой/слишком частый. Своё сообщение не ждёт сети.
+   */
+  sendChat(raw: string, replyTo?: string): ChatMessage | null {
+    const text = normalizeChatText(raw);
+    if (!text || text.length > CHAT_MAX_LENGTH) {
+      return null;
+    }
+    if (!this.canPublish()) {
+      return null;
+    }
+    const now = this.now();
+    if (now - this.lastChatAt < SELF_CHAT_GAP_MS) {
+      return null;
+    }
+    this.lastChatAt = now;
+    const id = createUlid(now);
+    this.send('room-chat', replyTo ? { text, replyTo } : { text }, undefined, id);
+    return {
+      id,
+      from: this.selfUserId,
+      name: this.profile.name,
+      color: this.profile.color,
+      ts: now,
+      kind: 'text',
+      text,
+      replyTo,
+      self: true,
+    };
+  }
+
+  /** Реакция: одиночный эмодзи, опционально с координатами на видео. */
+  sendReaction(emoji: string, position?: { x: number; y: number }): ReactionPayload | null {
+    if (!isEmojiSequence(emoji) || !this.canPublish()) {
+      return null;
+    }
+    const payload: ReactionPayload = { emoji };
+    if (position) {
+      payload.x = Math.min(1, Math.max(0, position.x));
+      payload.y = Math.min(1, Math.max(0, position.y));
+    }
+    this.send('reaction', payload);
+    return payload;
+  }
+
+  /** «Печатает…»: не чаще одного сообщения в 1.5 с, чтобы не грузить канал. */
+  sendTyping(on: boolean): void {
+    if (!this.canPublish()) {
+      return;
+    }
+    const now = this.now();
+    if (on && now - this.lastTypingAt < 1500) {
+      return;
+    }
+    this.lastTypingAt = now;
+    const payload: TypingPayload = { on };
+    this.send('typing', payload);
+  }
+
+  /**
+   * Отправить фото с прогрессом и отменой. Возвращает объект с `cancel()`:
+   * UI показывает прогресс, а пользователь может прервать передачу.
+   */
+  sendImage(
+    input: { bytes: Uint8Array; mime: string; w: number; h: number },
+    handlers: {
+      onProgress?: (sent: number, total: number) => void;
+      scope?: ImageScope;
+    } = {},
+  ): { id: string; cancel: () => void; done: Promise<SendImageResult> } {
+    const id = createUlid(this.now());
+    if (!this.canPublish()) {
+      return {
+        id,
+        cancel: () => undefined,
+        done: Promise.resolve({ ok: false, cancelled: false, chunks: 0, error: 'Комната не готова' }),
+      };
+    }
+    const done = sendImage({
+      transport: this.blobTransport(),
+      id,
+      bytes: input.bytes,
+      mime: input.mime,
+      w: input.w,
+      h: input.h,
+      scope: handlers.scope ?? 'chat',
+      isCancelled: () => this.cancelledImages.has(id) || this.stopped,
+      onProgress: handlers.onProgress,
+    }).then((result) => {
+      this.cancelledImages.delete(id);
+      if (!result.ok && !result.cancelled) {
+        this.emit({ type: 'image-error', id, reason: result.error ?? 'send-failed' });
+      }
+      return result;
+    });
+    return {
+      id,
+      cancel: () => {
+        this.cancelledImages.add(id);
+      },
+      done,
+    };
+  }
+
+  /** Отменить своё исходящее фото (кнопка «Отмена» в интерфейсе). */
+  cancelImage(id: string): void {
+    this.cancelledImages.add(id);
+  }
+
+  // ---------- Голос (§4.6) ----------
+
+  /**
+   * Подключить микрофон. Вызывается один раз при включении голоса; дальше
+   * mute/unmute идут через replaceTrack и не требуют renegotiation.
+   */
+  attachVoice(stream: MediaStream): void {
+    this.voiceStream = stream;
+    const track = stream.getAudioTracks()[0];
+    if (track) {
+      track.enabled = !this.micMutedValue;
+    }
+    this.channelValue?.addStream?.(stream);
+  }
+
+  get voiceAttached(): boolean {
+    return this.voiceStream !== null;
+  }
+
+  setMicMuted(muted: boolean): void {
+    this.micMutedValue = muted;
+    const track = this.voiceStream?.getAudioTracks()[0];
+    if (!track) {
+      return;
+    }
+    this.channelValue?.setMicMuted?.(track, muted);
+  }
+
+  get micMuted(): boolean {
+    return this.micMutedValue;
+  }
+
   // ---------- Канал и стратегии ----------
 
   private async openChannel(): Promise<void> {
@@ -448,6 +671,10 @@ export class RoomClient {
     this.openedAt = this.now();
     this.relayCount = channel.relayCount();
     this.bindChannel(channel);
+    if (this.voiceStream) {
+      // После реконнекта микрофон возвращаем в новое соединение.
+      channel.addStream?.(this.voiceStream);
+    }
     this.emit({ type: 'strategy', strategy, relays: this.relayCountValue() });
     this.emitMembers();
     this.armConnectCheck();
@@ -471,6 +698,27 @@ export class RoomClient {
           console.warn('[heliwatch] ошибка обработки сообщения', error);
         });
     };
+    channel.onBlobMessage = (data, peerId) => {
+      // Чанки идут через ту же очередь, что и JSON: `image-start` всегда
+      // обрабатывается раньше первого кадра, порядок DataChannel сохранён.
+      this.queue = this.queue
+        .then(() => {
+          if (this.peers.get(peerId)?.joined) {
+            this.images.frame(peerId, data);
+          }
+        })
+        .catch((error: unknown) => {
+          console.warn('[heliwatch] ошибка приёма чанка фото', error);
+        });
+    };
+    channel.onPeerStream = (stream, peerId) => {
+      this.emit({
+        type: 'voice-stream',
+        peerId,
+        userId: this.peers.get(peerId)?.userId ?? null,
+        stream,
+      });
+    };
   }
 
   private disposeChannel(): void {
@@ -480,6 +728,8 @@ export class RoomClient {
       channel.onPeerJoin = null;
       channel.onPeerLeave = null;
       channel.onMessage = null;
+      channel.onBlobMessage = null;
+      channel.onPeerStream = null;
       channel.leave();
     }
   }
@@ -667,10 +917,92 @@ export class RoomClient {
       case 'bye':
         this.handleBye(raw, peer);
         return;
+      case 'room-chat':
+        this.handleChat(raw, peer);
+        return;
+      case 'reaction':
+        this.handleReaction(raw, peer);
+        return;
+      case 'typing':
+        this.handleTyping(raw, peer);
+        return;
+      case 'image-start':
+        if (this.peerSocialAllowed(peer)) {
+          this.images.start(peer.peerId, raw.d);
+        }
+        return;
+      case 'image-chunk':
+        // Чанки приходят только бинарным action `hw-blob` (см. net/blobs.ts),
+        // JSON-вариант протокола оставлен на будущее и сейчас игнорируется.
+        return;
+      case 'image-end':
+        if (isImageEndPayload(raw.d)) {
+          this.images.end(peer.peerId, raw.d.id);
+        }
+        return;
+      case 'image-cancel':
+        if (isImageCancelPayload(raw.d)) {
+          this.images.cancel(peer.peerId, raw.d.id);
+        }
+        return;
       default:
-        // Остальные типы протокола появятся на этапах 3–7.
+        // Остальные типы протокола появятся на этапах 4–7.
         return;
     }
+  }
+
+  private handleChat(
+    envelope: { id: string; from: string; ts: number; d: unknown },
+    peer: PeerAuth,
+  ): void {
+    if (!isChatPayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    const profile = peer.profile ?? { name: 'Друг', color: '#6ff0c4' };
+    this.emit({
+      type: 'chat',
+      message: {
+        id: envelope.id,
+        from: envelope.from,
+        name: profile.name,
+        color: profile.color,
+        ts: typeof envelope.ts === 'number' ? envelope.ts : this.now(),
+        kind: 'text',
+        text: envelope.d.text.slice(0, CHAT_MAX_LENGTH),
+        replyTo: envelope.d.replyTo,
+        self: false,
+      },
+    });
+  }
+
+  private handleReaction(
+    envelope: { from: string; d: unknown },
+    peer: PeerAuth,
+  ): void {
+    if (!isReactionPayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    const profile = peer.profile ?? { name: 'Друг', color: '#6ff0c4' };
+    this.emit({
+      type: 'reaction',
+      from: envelope.from,
+      name: profile.name,
+      emoji: envelope.d.emoji,
+      x: envelope.d.x,
+      y: envelope.d.y,
+    });
+  }
+
+  private handleTyping(envelope: { from: string; d: unknown }, peer: PeerAuth): void {
+    if (!isTypingPayload(envelope.d)) {
+      return;
+    }
+    const profile = peer.profile ?? { name: 'Друг', color: '#6ff0c4' };
+    this.emit({ type: 'typing', from: envelope.from, name: profile.name, on: envelope.d.on });
+  }
+
+  private peerSocialAllowed(peer: PeerAuth): boolean {
+    return peer.chatLimiter.allow(this.now());
   }
 
   private handlePeerJoin(peerId: string): void {
@@ -697,6 +1029,7 @@ export class RoomClient {
       existing.profile = undefined;
       existing.joinedAt = undefined;
       existing.limiter.reset();
+      existing.chatLimiter.reset();
       this.sendHello(peerId);
       this.emit({ type: 'hint', message: null });
       this.hintShown = false;
@@ -708,6 +1041,7 @@ export class RoomClient {
       host: false,
       joined: false,
       limiter: new CommandRateLimiter(),
+      chatLimiter: new CommandRateLimiter(SOCIAL_MESSAGES_PER_WINDOW, SOCIAL_WINDOW_MS),
     });
     this.sendHello(peerId);
     this.emit({ type: 'hint', message: null });
@@ -766,6 +1100,7 @@ export class RoomClient {
       host: false,
       joined: false,
       limiter: new CommandRateLimiter(),
+      chatLimiter: new CommandRateLimiter(SOCIAL_MESSAGES_PER_WINDOW, SOCIAL_WINDOW_MS),
     };
     peer.userId = data.userId;
     peer.pub = data.pub;
@@ -1138,15 +1473,24 @@ export class RoomClient {
 
   // ---------- Отправка ----------
 
-  private send(type: string, data: unknown, to?: string): void {
+  private send(type: string, data: unknown, to?: string, id?: string): void {
     if (!this.channelValue) {
       return;
     }
     const envelope = createEnvelope(type, data, this.selfUserId, this.code, {
       to,
       now: this.now(),
+      id,
     });
     this.channelValue.send(envelope, to);
+  }
+
+  /** Транспорт чанков фото: JSON-контроль + бинарные кадры (§4.1). */
+  private blobTransport(): BlobTransport {
+    return {
+      sendJson: (type, data, to) => this.send(type, data, to),
+      sendBlob: (frame, to) => this.channelValue?.sendBlob(frame, to),
+    };
   }
 
   private async sendSigned(type: string, data: unknown, to?: string): Promise<void> {

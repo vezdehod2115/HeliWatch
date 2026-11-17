@@ -26,7 +26,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 |---|---|---|---|---|---|
 | 1 | Каркас: Tauri/Android, два WebView, тач-роутинг, тема, лого, README, CHANGELOG | 0.1.0 | ✅ завершён | 17.11.2026 | debug APK собран; проверка на телефонах и скриншоты — по чеклисту из README |
 | 2 | P2P-комнаты, identity, синхронизация сайта и локальных файлов | 0.2.3 | ✅ завершён | 17.11.2026 | 0.2.1: 16-КБ `.so`; 0.2.3: контейнер не добавляет Tauri-WebView в конструкторе (JNI abort); nonce-аутентификация, режимы A/C, автокоррекция |
-| 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ⬜ не начат | — | — |
+| 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ✅ завершён | 17.11.2026 | 0.3.0: голос с replaceTrack без renegotiation, индикатор речи и ducking, чат с typing и историей по желанию, фото чанками 16 КиБ по `hw-blob`, эмодзи и 8 быстрых реакций |
 | 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ⬜ не начат | — | — |
 | 5 | Стрим файла с телефона хоста | 0.5.0 | ⬜ не начат | — | — |
 | 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ⬜ не начат | — | — |
@@ -142,11 +142,11 @@ HeliWatch/
 ├─ src/
 │  ├─ main.tsx  App.tsx  styles/{theme.css, globals.css}
 │  ├─ app/{router.tsx, Shell.tsx}
-│  ├─ features/{lobby,room,site,videofile,localplay,chat,dm,friends,profile,stats,settings,pip,about}
+│  ├─ features/{lobby,room,site,videofile,localplay,chat,voice,dm,friends,profile,stats,settings,pip,about}
 │  ├─ net/{trystero.ts,peerjs.ts,protocol.ts,room.ts,identity.ts,blobs.ts,lobby.ts,outbox.ts,negotiation.ts}
 │  ├─ media/{voice.ts,stream.ts,capture.ts,ducking.ts,accent.ts,flags.ts}
 │  ├─ native/{siteBridge.ts,nativeBridge.ts,pip.ts,service.ts,permissions.ts,inject/site-hook.js}
-│  ├─ db/{index.ts,migrations.ts,repo/{profile,friends,dm,outbox,stats,avatars,settings,rooms}.ts,backup.ts}
+│  ├─ db/{index.ts,migrations.ts,repo/{profile,friends,dm,outbox,stats,avatars,settings,rooms,chat}.ts,backup.ts}
 │  └─ stores/{profile,room,chat,ui,settings,stats}.ts
 └─ src-tauri/
    ├─ Cargo.toml  tauri.conf.json  build.rs  src/{main.rs,lib.rs,db.rs}
@@ -250,7 +250,7 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 
 ### 4.7 Чанкинг, backpressure, фото и аватары
 
-Чанк 16 КиБ (`ArrayBuffer`, `hw-blob`), изображение ≤ 2 МБ после клиентского сжатия (canvas, длинная сторона 1280, JPEG 0.8). Отправитель: `image-start{size,chunks,sha256}` → цикл с `bufferedAmount`: высокий порог 1 МиБ, низкий 256 КиБ, ожидание `bufferedamountlow` (таймаут 10 с → `image-cancel`), прогресс в UI, кнопка «Отмена». Получатель: сборка по порядку, таймаут 30 с, проверка размера и SHA-256, при mismatch — один `image-nack` (повтор), затем `cancel`. Файлы — в `plugin-fs` кэше (LRU 200 МБ), миниатюры 256 px в canvas, в чате превью, тап — полноэкранный просмотр со свайпом. Аватары: та же схема, ≤128×128, лимит 50 файлов / 5 МБ, обмен по `avatarHash` (не шлём повторно). Лимит текста 4000 символов.
+Чанк 16 КиБ (`ArrayBuffer`, `hw-blob`), изображение ≤ 2 МБ после клиентского сжатия (canvas, длинная сторона 1280, JPEG 0.8). Отправитель: `image-start{size,chunks,sha256}` → цикл с `bufferedAmount`: высокий порог 1 МиБ, низкий 256 КиБ, ожидание `bufferedamountlow` (таймаут 10 с → `image-cancel`), прогресс в UI, кнопка «Отмена». Получатель: сборка по порядку, таймаут 30 с, проверка размера и SHA-256, при mismatch — один `image-nack` (повтор), затем `cancel`. Фото в 0.3.0 живут в памяти сессии: файлового кэша `plugin-fs` ещё нет, он появится вместе с LRU 200 МБ на этапе 7. Backpressure в 0.3.0 — последовательная отправка с паузой 8 мс: trystero не отдаёт `bufferedAmount`, а залп на 2 МБ рвёт канал. На этапе 7 фото переедут в кэш `plugin-fs` (LRU 200 МБ); миниатюры 256 px в canvas, в чате превью, тап — полноэкранный просмотр со свайпом. Аватары: та же схема, ≤128×128, лимит 50 файлов / 5 МБ, обмен по `avatarHash` (не шлём повторно). Лимит текста 4000 символов.
 
 ### 4.8 Сигналинг, ICE/TURN, лобби
 
@@ -279,6 +279,8 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 | `recent_rooms` | `code` | `last_join_at` |
 
 Правило хранилища: всё важное — только в SQLite (профиль, ключи, друзья, DM, статистика, настройки). `localStorage` не используем даже для UI-флагов: WebView может его почистить.
+
+`room_chat` в 0.3.0 пишется только при включённом сохранении истории (по умолчанию выключено): хранится текст, `image_path` остаётся пустым — фото живут в памяти сессии до появления файлового кэша на этапе 7. Настройки этапа 3: `chat.saveHistory`, `chat.emojiRecent`, `voice.ducking`.
 
 Сессии устойчивы к обрывам: строка открывается при входе, `heartbeat` каждые 30 с; при старте приложения «зависшие» сессии закрываются с `ended_at = last_heartbeat`, `end_reason=timeout`. Время пишется каждому участнику (mesh). Чистка: сессии > 365 дней, картинки LRU 200 МБ, DM-история без жёсткого лимита, но картинки — по LRU.
 
@@ -312,7 +314,7 @@ SemVer. Первый релиз `0.1.0`; завершённый этап = minor
 
 **Этап 1 — Каркас · 0.1.0**
 Цель: приложение запускается, сайт в нижнем WebView, прозрачный React сверху, касания работают, тёмная тема, лого, документация. Без WebRTC, PiP и сервисов.
-Файлы: `package.json`, `vite.config.ts`, `src/styles/theme.css`, `src/App.tsx`, `src/native/{siteBridge,nativeBridge}.ts`, `src/native/inject/site-hook.js` (только детект видео + тестовый обмен), `public/test-page.html` (кнопки, видео, поля ввода, скролл), `src-tauri/plugins/heliwatch/**` (контейнер, роутер, chrome client, разрешения-заглушки), `src-tauri/tauri.conf.json`, патч-скрипты, `docs/branding/*`, `README.md`, `CHANGELOG.md`.
+Файлы: `package.json`, `vite.config.ts`, `src/styles/theme.css`, `src/App.tsx`, `src/native/{siteBridge,nativeBridge}.ts`, `src/native/inject/site-hook.js` (только детект видео + тестовый обмен), `public/test-page.html` (кнопки, видео, поля ввода, скролл), `src-tauri/plugins/heliwatch/**` (контейнер, роутер, chrome client, разрешения-заглушки), `src-tauri/tauri.conf.json`, патч-скрипты, `docs/branding/*`, `README.md`.
 Готово: `tauri android dev` и APK; внизу открывается тестовая страница (`youtube.com` и локальная `test-page.html` с кнопками/видео), сверху React-панель; тап по кнопкам сайта срабатывает, тап по панели — нет; тема/токены на месте; системные разрешения объявлены; выбор файла через пикер открывается.
 Чеклист на телефонах (Android 11/13/15): сайт скроллится и играет, оверлей не мешает; тапы на границе панели не теряются; клавиатура открывается в React-инпуте и в поле сайта; поворот экрана не ломает раскладку; логин в YouTube сохраняется после перезапуска; `back` уходит по истории сайта и не закрывает приложение при открытой панели; прозрачность без артефактов; память < 400 МБ.
 

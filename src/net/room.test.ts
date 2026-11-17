@@ -20,8 +20,15 @@ class FakeChannel implements Channel {
   onPeerJoin: ((peerId: string) => void) | null = null;
   onPeerLeave: ((peerId: string) => void) | null = null;
   onMessage: ((data: unknown, peerId: string) => void) | null = null;
+  onBlobMessage: ((data: unknown, peerId: string) => void) | null = null;
+  onPeerStream: ((stream: MediaStream, peerId: string) => void) | null = null;
   readonly peers = new Map<string, FakeChannel>();
   readonly received: unknown[] = [];
+  readonly receivedBlobs: unknown[] = [];
+  /** Записи вызовов голосового API: проверяем replaceTrack без renegotiation. */
+  readonly streamCalls: string[] = [];
+  micTrack: MediaStreamTrack | null = null;
+  mutedCalls: boolean[] = [];
 
   constructor(selfId: string) {
     this.selfId = selfId;
@@ -34,6 +41,25 @@ class FakeChannel implements Channel {
       target?.received.push(copy);
       target?.onMessage?.(copy, this.selfId);
     }
+  }
+
+  sendBlob(data: ArrayBuffer, to?: string): void {
+    const copy = data.slice(0);
+    const targets = to ? [this.peers.get(to)] : [...this.peers.values()];
+    for (const target of targets) {
+      target?.receivedBlobs.push(copy);
+      target?.onBlobMessage?.(copy, this.selfId);
+    }
+  }
+
+  addStream(stream: MediaStream): void {
+    this.micTrack = stream.getAudioTracks?.()[0] ?? null;
+    this.streamCalls.push('addStream');
+  }
+
+  setMicMuted(track: MediaStreamTrack, muted: boolean): void {
+    this.mutedCalls.push(muted);
+    void track;
   }
 
   knownPeers(): string[] {
@@ -290,5 +316,123 @@ describe('RoomClient: nonce-аутентификация и синхрониза
     expect(denied.length).toBeGreaterThan(0);
     const lastDenied = denied[denied.length - 1] as Envelope<{ reason: string }>;
     expect(lastDenied.d.reason).toBe('nonce-replayed');
+  });
+});
+
+describe('RoomClient: чат, реакции, «печатает…»', () => {
+  it('сообщение доходит до собеседника с именем и цветом', async () => {
+    const { host, guest, guestEvents } = await createPair();
+    const sent = host.sendChat('Привет из комнаты');
+    expect(sent?.self).toBe(true);
+    expect(sent?.text).toBe('Привет из комнаты');
+    await settle(host, guest);
+
+    const chat = guestEvents.find((event) => event.type === 'chat');
+    expect(chat).toBeDefined();
+    if (chat?.type === 'chat') {
+      expect(chat.message.text).toBe('Привет из комнаты');
+      expect(chat.message.name).toBe('Хост');
+      expect(chat.message.color).toBe('#6ff0c4');
+      expect(chat.message.self).toBe(false);
+      expect(chat.message.id).toBe(sent?.id);
+    }
+  });
+
+  it('пустой текст не отправляется, ответ с replyTo сохраняется', async () => {
+    const { host, guest, guestEvents } = await createPair();
+    expect(host.sendChat('   ')).toBeNull();
+    await settle(host, guest);
+    expect(guestEvents.some((event) => event.type === 'chat')).toBe(false);
+
+    host.sendChat('ответ', 'msg-previous');
+    await settle(host, guest);
+    const chat = guestEvents.filter((event) => event.type === 'chat').pop();
+    if (chat?.type === 'chat') {
+      expect(chat.message.replyTo).toBe('msg-previous');
+    } else {
+      throw new Error('сообщение не дошло');
+    }
+  });
+
+  it('флуд от одного пира режется лимитом 12 сообщений', async () => {
+    const { host, guest, hostEvents, guestChannel } = await createPair();
+    // Антифлуд отправителя обходим: бьём сырыми конвертами, как шумный пир.
+    for (let index = 0; index < 20; index += 1) {
+      guestChannel.send(
+        createEnvelope('room-chat', { text: `сообщение ${index}` }, guest.selfUserId, host.code),
+      );
+    }
+    await settle(host, guest);
+    const delivered = hostEvents.filter((event) => event.type === 'chat');
+    expect(delivered.length).toBe(12);
+  });
+
+  it('реакция и typing доходят до собеседника', async () => {
+    const { host, guest, guestEvents } = await createPair();
+    expect(host.sendReaction('🔥', { x: 0.2, y: 0.8 })).not.toBeNull();
+    expect(host.sendReaction('не эмодзи')).toBeNull();
+    host.sendTyping(true);
+    await settle(host, guest);
+
+    const reaction = guestEvents.find((event) => event.type === 'reaction');
+    expect(reaction).toBeDefined();
+    if (reaction?.type === 'reaction') {
+      expect(reaction.emoji).toBe('🔥');
+      expect(reaction.name).toBe('Хост');
+      expect(reaction.x).toBeCloseTo(0.2, 5);
+    }
+    const typing = guestEvents.find((event) => event.type === 'typing');
+    if (typing?.type === 'typing') {
+      expect(typing.on).toBe(true);
+      expect(typing.name).toBe('Хост');
+    } else {
+      throw new Error('typing не дошёл');
+    }
+  });
+});
+
+describe('RoomClient: фото и голос', () => {
+  it('фото проходит чанками и собирается у получателя', async () => {
+    const { host, guest, guestEvents } = await createPair();
+    const bytes = new Uint8Array(1000);
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = index % 251;
+    }
+    const handle = host.sendImage({ bytes, mime: 'image/jpeg', w: 320, h: 240 });
+    const result = await handle.done;
+    expect(result.ok).toBe(true);
+    await settle(host, guest);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await settle(host, guest);
+
+    const image = guestEvents.find((event) => event.type === 'image');
+    if (image?.type !== 'image') {
+      throw new Error('фото не собралось');
+    }
+    expect(image.bytes.byteLength).toBe(bytes.byteLength);
+    expect(image.mime).toBe('image/jpeg');
+    expect(image.name).toBe('Хост');
+  });
+
+  it('микрофон идёт addStream, mute — setMicMuted без повторного addStream', async () => {
+    const { host, hostChannel } = await createPair();
+    const track = { kind: 'audio', enabled: true } as unknown as MediaStreamTrack;
+    const stream = {
+      getAudioTracks: () => [track],
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+
+    host.attachVoice(stream);
+    expect(hostChannel.streamCalls).toEqual(['addStream']);
+    expect(track.enabled).toBe(true);
+
+    host.setMicMuted(true);
+    expect(hostChannel.mutedCalls).toEqual([true]);
+    expect(host.micMuted).toBe(true);
+
+    host.setMicMuted(false);
+    expect(hostChannel.mutedCalls).toEqual([true, false]);
+    // Повторного addStream (renegotiation) нет — только replaceTrack.
+    expect(hostChannel.streamCalls).toEqual(['addStream']);
   });
 });

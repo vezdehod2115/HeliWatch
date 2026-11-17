@@ -258,6 +258,13 @@
             return false;
           }
           video.playbackRate = rate;
+        } else if (name === 'setVolume') {
+          // Ducking из React (§2.5): пока кто-то говорит, звук видео тише.
+          var volume = Number(cmd.volume);
+          if (!isFinite(volume)) {
+            return false;
+          }
+          video.volume = Math.min(1, Math.max(0, volume));
         } else if (name === 'mute') {
           video.muted = !!cmd.muted;
         } else {

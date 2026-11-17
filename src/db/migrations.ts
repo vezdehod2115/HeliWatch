@@ -7,7 +7,7 @@
  */
 
 export const DB_URL = 'sqlite:heliwatch.db';
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface ProfileRow {
   id: number;
@@ -34,4 +34,16 @@ export interface RecentRoomRow {
   code: string;
   mode: string;
   last_join_at: number;
+}
+
+/** История чата комнаты (этап 3, §5): пишется только по желанию. */
+export interface RoomChatRow {
+  id: string;
+  room_code: string;
+  ts: number;
+  from_user_id: string;
+  kind: string;
+  body: string;
+  image_path: string | null;
+  saved: number;
 }

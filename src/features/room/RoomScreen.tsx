@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useRef, useState } from 'react';
 import { BottomBar } from '../site/BottomBar';
 import { TopBar } from '../site/TopBar';
 import { RoomBar } from './RoomBar';
 import { LocalPlayer, type LocalPlayerHandle } from '../localplay/LocalPlayer';
+import { ChatDock } from '../chat/ChatDock';
+import { ChatPanel } from '../chat/ChatPanel';
+import { FloatingReactions } from '../chat/Reactions';
+import { ImageViewer } from '../chat/ImageViewer';
+import { RemoteAudio } from '../voice/RemoteAudio';
+import { imageUrlFromBytes, prepareImage, type PreparedImage } from '../chat/imagePrep';
 import type { SiteController } from '../site/useSiteController';
 import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl } from '../../native/siteBridge';
 import type { LocalProfile } from '../../db/repo/identity';
@@ -10,6 +16,7 @@ import { roomLink } from '../../net/protocol';
 import {
   actionFromVideoEvent,
   projectState,
+  type ChatMessage,
   type PlaybackAction,
   type PlaybackSample,
   type PlaybackState,
@@ -20,6 +27,12 @@ import type { Identity } from '../../net/identity';
 import { RoomClient, type RoomEvent } from '../../net/room';
 import { connectTrystero } from '../../net/trystero';
 import { useRoomStore } from '../../stores/room';
+import { useChatStore } from '../../stores/chat';
+import { SETTINGS_KEYS, readSetting, writeSetting } from '../../db/repo/settings';
+import { listRoomMessages, saveRoomMessage } from '../../db/repo/chat';
+import { sanitizeRecent } from '../chat/emoji';
+import { DuckingController } from '../../media/ducking';
+import { VoiceEngine, describeVoiceError, isVoiceSupported } from '../../media/voice';
 import { type PlaybackView } from '../../app/playback';
 import { Icon } from '../../app/icons';
 
@@ -51,6 +64,10 @@ const EMPTY_VIEW: PlaybackView = {
   rate: 1,
 };
 
+const TYPING_IDLE_MS = 2500;
+const DEFAULT_REACTION_X = 0.5;
+const DEFAULT_REACTION_Y = 0.62;
+
 function sampleFromView(view: PlaybackView, action: PlaybackAction): PlaybackSample {
   return {
     playing: action.kind === 'play' ? true : action.kind === 'pause' ? false : view.playing,
@@ -69,7 +86,7 @@ function videoDataSample(data: Record<string, unknown>): PlaybackSample {
   };
 }
 
-/** Комната: транспорт, синхронизация и два режима — сайт (A) и файл (C). */
+/** Комната: транспорт, синхронизация, голос и чат (режимы A и C). */
 export function RoomScreen({
   code,
   role,
@@ -84,9 +101,18 @@ export function RoomScreen({
   notify,
 }: RoomScreenProps) {
   const snapshot = useRoomStore();
+  const chat = useChatStore();
   const [localView, setLocalView] = useState<PlaybackView>(EMPTY_VIEW);
   const [localFile, setLocalFile] = useState<LocalFile | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  const [reactionsOpen, setReactionsOpen] = useState(false);
+  const [viewerImageId, setViewerImageId] = useState<string | null>(null);
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [speaking, setSpeaking] = useState<Record<string, string>>({});
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
@@ -104,6 +130,12 @@ export function RoomScreen({
   const notifyRef = useRef(notify);
   const onLeaveRef = useRef(onLeave);
   const onJoinedRef = useRef(onJoined);
+  const voiceEngineRef = useRef<VoiceEngine | null>(null);
+  const duckingRef = useRef<DuckingController | null>(null);
+  const memberNameRef = useRef<(peerId: string) => string>(() => 'Друг');
+  const preparedRef = useRef(new Map<string, PreparedImage>());
+  const viewerRef = useRef<string | null>(null);
+  const typingTimer = useRef<number | null>(null);
 
   notifyRef.current = notify;
   onLeaveRef.current = onLeave;
@@ -111,6 +143,13 @@ export function RoomScreen({
   siteRef.current = site;
   modeRef.current = snapshot.mode;
   localFileRef.current = localFile;
+  viewerRef.current = viewerImageId;
+  memberNameRef.current = (peerId: string) => {
+    const member = useRoomStore
+      .getState()
+      .members.find((item) => item.peerId === peerId);
+    return member?.name ?? 'Друг';
+  };
 
   const applyRemote = useCallback((action: PlaybackAction) => {
     applyingRemoteUntil.current = Date.now() + 800;
@@ -184,6 +223,236 @@ export function RoomScreen({
     onLeaveRef.current();
   }, [role]);
 
+  // ---------- Чат: отправка ----------
+
+  const persistMessage = useCallback((message: ChatMessage) => {
+    if (!useChatStore.getState().saveHistory || message.kind !== 'text' || !message.text) {
+      return;
+    }
+    void saveRoomMessage(code, message).catch(() => undefined);
+  }, [code]);
+
+  const sendChat = useCallback(() => {
+    const client = clientRef.current;
+    if (!client) {
+      return;
+    }
+    const store = useChatStore.getState();
+    const message = client.sendChat(store.draft);
+    if (!message) {
+      if (store.draft.trim()) {
+        notifyRef.current('Слишком быстро — попробуйте ещё раз');
+      }
+      return;
+    }
+    store.addMessage(message);
+    store.setDraft('');
+    persistMessage(message);
+    client.sendTyping(false);
+    if (typingTimer.current !== null) {
+      window.clearTimeout(typingTimer.current);
+      typingTimer.current = null;
+    }
+  }, [persistMessage]);
+
+  const onDraft = useCallback((text: string) => {
+    const store = useChatStore.getState();
+    store.setDraft(text);
+    const client = clientRef.current;
+    if (!client) {
+      return;
+    }
+    client.sendTyping(text.trim().length > 0);
+    if (typingTimer.current !== null) {
+      window.clearTimeout(typingTimer.current);
+    }
+    typingTimer.current = window.setTimeout(() => {
+      typingTimer.current = null;
+      clientRef.current?.sendTyping(false);
+    }, TYPING_IDLE_MS);
+  }, []);
+
+  const rememberEmoji = useCallback((emoji: string) => {
+    const store = useChatStore.getState();
+    store.rememberEmoji(emoji);
+    void writeSetting(SETTINGS_KEYS.emojiRecent, store.recents).catch(() => undefined);
+  }, []);
+
+  const onEmoji = useCallback(
+    (emoji: string) => {
+      const store = useChatStore.getState();
+      store.setDraft(`${store.draft}${emoji}`);
+      store.setEmojiOpen(false);
+      rememberEmoji(emoji);
+    },
+    [rememberEmoji],
+  );
+
+  const sendReaction = useCallback(
+    (emoji: string) => {
+      const client = clientRef.current;
+      if (!client) {
+        return;
+      }
+      const sent = client.sendReaction(emoji, { x: DEFAULT_REACTION_X, y: DEFAULT_REACTION_Y });
+      if (!sent) {
+        return;
+      }
+      useChatStore.getState().addReaction({
+        emoji,
+        from: identity.userId,
+        name: profile.displayName,
+        x: DEFAULT_REACTION_X,
+        y: DEFAULT_REACTION_Y,
+        self: true,
+      });
+      rememberEmoji(emoji);
+      setReactionsOpen(false);
+    },
+    [identity.userId, profile.displayName, rememberEmoji],
+  );
+
+  /** Отправка фото: прогресс, отмена и повтор живут в ChatPanel. */
+  const sendPreparedImage = useCallback((prepared: PreparedImage) => {
+    const client = clientRef.current;
+    const store = useChatStore.getState();
+    if (!client) {
+      return;
+    }
+    let imageId = '';
+    const handle = client.sendImage(
+      { bytes: prepared.bytes, mime: prepared.mime, w: prepared.w, h: prepared.h },
+      {
+        onProgress: (sent, total) => {
+          if (!imageId) {
+            return;
+          }
+          useChatStore.getState().setTransfer({
+            id: imageId,
+            direction: 'out',
+            progress: sent,
+            total,
+          });
+        },
+      },
+    );
+    imageId = handle.id;
+    preparedRef.current.set(imageId, prepared);
+    store.setImage(imageId, prepared.previewUrl);
+    store.addMessage({
+      id: imageId,
+      from: identity.userId,
+      name: profile.displayName,
+      color: profile.nameColor,
+      ts: Date.now(),
+      kind: 'image',
+      imageId,
+      self: true,
+      pending: true,
+    });
+    store.setTransfer({
+      id: imageId,
+      direction: 'out',
+      progress: 0,
+      total: prepared.bytes.byteLength,
+    });
+    void handle.done.then((result) => {
+      const state = useChatStore.getState();
+      state.clearTransfer(imageId);
+      if (result.ok) {
+        state.updateMessage(imageId, { pending: false });
+        preparedRef.current.delete(imageId);
+        return;
+      }
+      state.updateMessage(imageId, {
+        pending: false,
+        failed: true,
+        text: result.cancelled ? 'Отменено' : undefined,
+      });
+      if (!result.cancelled) {
+        notifyRef.current(result.error ?? 'Фото не доставлено');
+      }
+    });
+  }, [identity.userId, profile.displayName, profile.nameColor]);
+
+  const onPhoto = useCallback(
+    (file: File) => {
+      void prepareImage(file)
+        .then((prepared) => sendPreparedImage(prepared))
+        .catch((error: unknown) => {
+          notifyRef.current(
+            error instanceof Error ? error.message : 'Не удалось подготовить фото',
+          );
+        });
+    },
+    [sendPreparedImage],
+  );
+
+  const onRetryImage = useCallback(
+    (messageId: string) => {
+      const prepared = preparedRef.current.get(messageId);
+      if (prepared) {
+        sendPreparedImage(prepared);
+        return;
+      }
+      notifyRef.current('Выберите фото заново');
+    },
+    [sendPreparedImage],
+  );
+
+  const onCancelTransfer = useCallback((imageId: string) => {
+    clientRef.current?.cancelImage(imageId);
+  }, []);
+
+  const toggleSaveHistory = useCallback(() => {
+    const store = useChatStore.getState();
+    const next = !store.saveHistory;
+    store.setSaveHistory(next);
+    void writeSetting(SETTINGS_KEYS.chatHistory, next).catch(() => undefined);
+    if (next) {
+      for (const message of store.messages) {
+        if (message.kind === 'text' && message.text) {
+          void saveRoomMessage(code, message).catch(() => undefined);
+        }
+      }
+      notifyRef.current('История чата сохраняется на этом телефоне');
+    } else {
+      notifyRef.current('История чата больше не сохраняется');
+    }
+  }, [code]);
+
+  // ---------- Голос ----------
+
+  const toggleMic = useCallback(() => {
+    const client = clientRef.current;
+    const engine = voiceEngineRef.current;
+    if (!client || !engine) {
+      return;
+    }
+    if (!engine.active) {
+      setVoiceBusy(true);
+      void engine
+        .start()
+        .then((stream) => {
+          client.attachVoice(stream);
+          client.setMicMuted(false);
+          setVoiceActive(true);
+          setVoiceMuted(false);
+        })
+        .catch((error: unknown) => {
+          notifyRef.current(describeVoiceError(error));
+        })
+        .finally(() => setVoiceBusy(false));
+      return;
+    }
+    const muted = !client.micMuted;
+    engine.setMuted(muted);
+    client.setMicMuted(muted);
+    setVoiceMuted(muted);
+  }, []);
+
+  // ---------- Жизненный цикл комнаты ----------
+
   useEffect(() => {
     useRoomStore.getState().reset();
     useRoomStore.getState().patch({
@@ -204,6 +473,87 @@ export function RoomScreen({
           host: role === 'host',
         },
       ],
+    });
+
+    const chatStore = useChatStore.getState();
+    chatStore.init(code);
+
+    // Настройки (SQLite): история чата, ducking и недавние эмодзи.
+    void (async () => {
+      const [history, ducking, recents] = await Promise.all([
+        readSetting<boolean>(SETTINGS_KEYS.chatHistory, false),
+        readSetting<boolean>(SETTINGS_KEYS.voiceDucking, true),
+        readSetting<unknown>(SETTINGS_KEYS.emojiRecent, []),
+      ]);
+      const store = useChatStore.getState();
+      store.setSaveHistory(history === true);
+      store.setRecents(sanitizeRecent(recents));
+      duckingRef.current?.setEnabled(ducking !== false);
+      if (history === true) {
+        const stored = await listRoomMessages(code);
+        const messages: ChatMessage[] = stored
+          .filter((row) => row.kind === 'text')
+          .map((row) => ({
+            id: row.id,
+            from: row.from,
+            name: row.from === identity.userId ? profile.displayName : 'Друг',
+            color: row.from === identity.userId ? profile.nameColor : '#9dbfb7',
+            ts: row.ts,
+            kind: 'text',
+            text: row.body,
+            self: row.from === identity.userId,
+          }));
+        if (messages.length > 0) {
+          useChatStore.getState().loadMessages(messages);
+        }
+      }
+    })();
+
+    // Голос и ducking живут столько же, сколько комната.
+    const engine = new VoiceEngine({
+      onLocal: (decision) => {
+        setVoiceLevel(decision.level);
+        duckingRef.current?.setSpeaking('self', decision.speaking);
+        setSpeaking((prev) => {
+          if (decision.speaking) {
+            return prev.self === profile.displayName
+              ? prev
+              : { ...prev, self: profile.displayName };
+          }
+          if (!('self' in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next.self;
+          return next;
+        });
+      },
+      onRemote: (peerId, decision) => {
+        const name = memberNameRef.current(peerId);
+        duckingRef.current?.setSpeaking(peerId, decision.speaking);
+        setSpeaking((prev) => {
+          if (decision.speaking) {
+            return prev[peerId] === name ? prev : { ...prev, [peerId]: name };
+          }
+          if (!(peerId in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[peerId];
+          return next;
+        });
+      },
+    });
+    voiceEngineRef.current = engine;
+    duckingRef.current = new DuckingController({
+      enabled: true,
+      apply: (volume) => {
+        if (modeRef.current === 'site') {
+          siteRef.current.setVolume(volume);
+        } else {
+          localRef.current?.setVolume(volume);
+        }
+      },
     });
 
     const handleEvent = (event: RoomEvent) => {
@@ -273,6 +623,99 @@ export function RoomScreen({
         case 'hint':
           store.patch({ hint: event.message });
           break;
+        case 'chat': {
+          const chatState = useChatStore.getState();
+          chatState.setNotice(null);
+          chatState.addMessage(event.message);
+          if (chatState.saveHistory) {
+            void saveRoomMessage(code, event.message).catch(() => undefined);
+          }
+          break;
+        }
+        case 'reaction':
+          useChatStore.getState().addReaction({
+            emoji: event.emoji,
+            from: event.from,
+            name: event.name,
+            x: typeof event.x === 'number' ? event.x : DEFAULT_REACTION_X,
+            y: typeof event.y === 'number' ? event.y : DEFAULT_REACTION_Y,
+            self: false,
+          });
+          break;
+        case 'typing':
+          useChatStore.getState().setTyping(event.from, event.name, event.on);
+          break;
+        case 'image-start': {
+          const chatState = useChatStore.getState();
+          chatState.setTransfer({
+            id: event.info.id,
+            direction: 'in',
+            progress: event.info.received,
+            total: event.info.size,
+          });
+          chatState.addMessage({
+            id: event.info.id,
+            from: '',
+            name: 'Друг',
+            color: '#9dbfb7',
+            ts: Date.now(),
+            kind: 'image',
+            imageId: event.info.id,
+            pending: true,
+          });
+          break;
+        }
+        case 'image-progress': {
+          useChatStore.getState().setTransfer({
+            id: event.info.id,
+            direction: 'in',
+            progress: event.info.received,
+            total: event.info.size,
+          });
+          break;
+        }
+        case 'image': {
+          const chatState = useChatStore.getState();
+          const url = imageUrlFromBytes(event.bytes, event.mime);
+          chatState.setImage(event.id, url);
+          chatState.clearTransfer(event.id);
+          chatState.setNotice(null);
+          // Сообщение могло появиться ещё на `image-start` — тогда обновляем его.
+          chatState.updateMessage(event.id, {
+            from: event.from,
+            name: event.name,
+            color: event.color,
+            ts: event.ts,
+            pending: false,
+            failed: false,
+          });
+          chatState.addMessage({
+            id: event.id,
+            from: event.from,
+            name: event.name,
+            color: event.color,
+            ts: event.ts,
+            kind: 'image',
+            imageId: event.id,
+            pending: false,
+          });
+          break;
+        }
+        case 'image-error': {
+          const chatState = useChatStore.getState();
+          chatState.clearTransfer(event.id);
+          chatState.updateMessage(event.id, { pending: false, failed: true });
+          chatState.setNotice(
+            event.reason === 'checksum' || event.reason === 'size'
+              ? 'Фото дошло с ошибкой — попробуйте отправить снова'
+              : 'Фото не доставлено — повторите отправку',
+          );
+          break;
+        }
+        case 'voice-stream':
+          setRemoteStreams((prev) => ({ ...prev, [event.peerId]: event.stream }));
+          voiceEngineRef.current?.attachRemote(event.peerId, event.stream);
+          break;
         case 'error':
           store.patch({ error: event.message });
           notifyRef.current(event.message);
@@ -288,6 +731,15 @@ export function RoomScreen({
           }, 1800);
           break;
         case 'peer-left':
+          setRemoteStreams((prev) => {
+            if (!(event.peerId in prev)) {
+              return prev;
+            }
+            const next = { ...prev };
+            delete next[event.peerId];
+            return next;
+          });
+          voiceEngineRef.current?.detachRemote(event.peerId);
           break;
         case 'debug':
           store.patch({ peerCount: event.peers, driverId: event.driverId });
@@ -331,6 +783,18 @@ export function RoomScreen({
         window.clearTimeout(closeTimer.current);
         closeTimer.current = null;
       }
+      if (typingTimer.current !== null) {
+        window.clearTimeout(typingTimer.current);
+        typingTimer.current = null;
+      }
+      engine.stop();
+      voiceEngineRef.current = null;
+      duckingRef.current?.dispose();
+      duckingRef.current = null;
+      // Голос закончился — возвращаем сайту полную громкость.
+      siteRef.current.setVolume(1);
+      useChatStore.getState().reset();
+      setRemoteStreams({});
     };
     // Параметры комнаты фиксируются при монтировании: смена кода — новый экран.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -340,6 +804,22 @@ export function RoomScreen({
   useEffect(
     () =>
       site.onEvent((event) => {
+        if (event.t === 'back-overlay') {
+          // Системный back при открытой панели: закрываем верхнюю.
+          if (viewerRef.current) {
+            setViewerImageId(null);
+            return;
+          }
+          const chatState = useChatStore.getState();
+          if (chatState.emojiOpen) {
+            chatState.setEmojiOpen(false);
+            return;
+          }
+          if (chatState.open) {
+            chatState.setOpen(false);
+          }
+          return;
+        }
         if (event.t !== 'page' || modeRef.current !== 'site') {
           return;
         }
@@ -373,6 +853,24 @@ export function RoomScreen({
       }),
     [site.onEvent, reportAction],
   );
+
+  // Системный back перехватывается, только пока открыта панель React.
+  useEffect(() => {
+    const captured = chat.open || chat.emojiOpen || viewerImageId !== null;
+    siteRef.current.setBackCapture(captured);
+    return () => {
+      // Уходим из комнаты с открытой панелью — back снова принадлежит истории.
+      siteRef.current.setBackCapture(false);
+    };
+  }, [chat.open, chat.emojiOpen, viewerImageId]);
+
+  // «Печатает…» протухает само: чистим раз в секунду, пока чат открыт.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      useChatStore.getState().pruneTyping();
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Хост публикует адрес сайта: обычная навигация внутри WebView тоже.
   useEffect(() => {
@@ -423,6 +921,10 @@ export function RoomScreen({
       if (file) {
         URL.revokeObjectURL(file.url);
       }
+      for (const prepared of preparedRef.current.values()) {
+        URL.revokeObjectURL(prepared.previewUrl);
+      }
+      preparedRef.current.clear();
     },
     [],
   );
@@ -607,6 +1109,10 @@ export function RoomScreen({
         : undefined;
 
   const waiting = snapshot.phase === 'connecting' || snapshot.phase === 'reconnecting';
+  const lastMessage = chat.messages.length > 0 ? (chat.messages[chat.messages.length - 1] ?? null) : null;
+  const typingNames = Object.values(chat.typing).map((peer) => peer.name);
+  const speakingNames = Object.values(speaking);
+  const viewerUrl = viewerImageId ? chat.images[viewerImageId] : undefined;
 
   return (
     <div className={`hw-app hw-app--room hw-app--${snapshot.mode}`}>
@@ -655,28 +1161,85 @@ export function RoomScreen({
         />
       )}
 
-      {snapshot.mode === 'site' ? (
-        <main className="hw-stage" aria-hidden="true">
-          {waiting && (
-            <div className="hw-roomwait" data-hw-region="roomwait">
-              <span className="hw-spinner" aria-hidden="true" />
-              <strong>{snapshot.phase === 'reconnecting' ? 'Переподключаемся…' : 'Подключаемся к комнате'}</strong>
-              <span>Код {code}. Сайт откроется, когда хост ответит.</span>
-            </div>
-          )}
-        </main>
-      ) : (
-        <LocalPlayer
-          ref={localRef}
-          src={localFile?.url ?? null}
-          fileName={localFile?.name ?? null}
-          onPick={pickFile}
-          onMetadata={onMetadata}
-          onProgress={onProgress}
-          onUserAction={onLocalUserAction}
-          onNotice={(text) => notifyRef.current(text)}
-        />
-      )}
+      <div className="hw-mid">
+        {snapshot.mode === 'site' ? (
+          <main className="hw-stage" aria-hidden="true">
+            {waiting && (
+              <div className="hw-roomwait" data-hw-region="roomwait">
+                <span className="hw-spinner" aria-hidden="true" />
+                <strong>{snapshot.phase === 'reconnecting' ? 'Переподключаемся…' : 'Подключаемся к комнате'}</strong>
+                <span>Код {code}. Сайт откроется, когда хост ответит.</span>
+              </div>
+            )}
+          </main>
+        ) : (
+          <LocalPlayer
+            ref={localRef}
+            src={localFile?.url ?? null}
+            fileName={localFile?.name ?? null}
+            onPick={pickFile}
+            onMetadata={onMetadata}
+            onProgress={onProgress}
+            onUserAction={onLocalUserAction}
+            onNotice={(text) => notifyRef.current(text)}
+          />
+        )}
+
+        {chat.open && (
+          <ChatPanel
+            messages={chat.messages}
+            images={chat.images}
+            transfers={chat.transfers}
+            typingNames={typingNames}
+            draft={chat.draft}
+            emojiOpen={chat.emojiOpen}
+            recents={chat.recents}
+            saveHistory={chat.saveHistory}
+            notice={chat.notice}
+            onDraft={onDraft}
+            onSend={sendChat}
+            onClose={() => useChatStore.getState().setOpen(false)}
+            onPhoto={onPhoto}
+            onRetry={onRetryImage}
+            onCancelTransfer={onCancelTransfer}
+            onOpenImage={(id) => setViewerImageId(id)}
+            onEmoji={onEmoji}
+            onReact={sendReaction}
+            onToggleEmoji={() => useChatStore.getState().setEmojiOpen(!chat.emojiOpen)}
+            onToggleSaveHistory={toggleSaveHistory}
+          />
+        )}
+      </div>
+
+      <FloatingReactions
+        reactions={chat.reactions}
+        onDone={(key) => useChatStore.getState().dropReaction(key)}
+      />
+
+      <ChatDock
+        lastMessage={lastMessage}
+        unread={chat.unread}
+        open={chat.open}
+        reactionsOpen={reactionsOpen}
+        voice={{
+          supported: isVoiceSupported(),
+          active: voiceActive,
+          muted: voiceMuted,
+          level: voiceLevel,
+          speaking: speakingNames,
+          busy: voiceBusy,
+        }}
+        onOpen={() => {
+          const store = useChatStore.getState();
+          store.setOpen(!store.open);
+          if (store.open) {
+            setReactionsOpen(false);
+          }
+        }}
+        onToggleReactions={() => setReactionsOpen((value) => !value)}
+        onReaction={sendReaction}
+        onToggleMic={toggleMic}
+      />
 
       <BottomBar
         view={view}
@@ -692,6 +1255,12 @@ export function RoomScreen({
         canSync={snapshot.phase === 'joined' && found}
         driverLabel={driverName}
       />
+
+      {viewerImageId && viewerUrl && (
+        <ImageViewer url={viewerUrl} onClose={() => setViewerImageId(null)} />
+      )}
+
+      <RemoteAudio streams={remoteStreams} />
 
       {(snapshot.phase === 'closed' || snapshot.phase === 'error') && (
         <div className="hw-roommsg" data-hw-region="roommsg">

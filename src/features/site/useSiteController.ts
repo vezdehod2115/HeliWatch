@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   TEST_PAGE_URL,
   YOUTUBE_URL,
+  captureBack,
   initSite,
   navigateSite,
   normalizeUrl,
   openSite,
   sendSiteCommand,
+  setSiteVolume,
   subscribeSiteEvents,
 } from '../../native/siteBridge';
 import { isNativeRuntime } from '../../native/nativeBridge';
@@ -26,6 +28,10 @@ export interface SiteController {
   nav: (action: NavAction) => void;
   reload: () => void;
   applyPlayback: (action: PlaybackAction) => void;
+  /** Громкость видео сайта 0…1 (ducking при голосе, этап 3). */
+  setVolume: (volume: number) => void;
+  /** Перехват системного back, пока открыта панель React. */
+  setBackCapture: (on: boolean) => void;
   openTestPage: () => void;
   openYoutube: () => void;
   /** Подписка на «сырые» события для синхронизации комнаты. */
@@ -156,6 +162,14 @@ export function useSiteController(): SiteController {
     }
   }, []);
 
+  const setVolume = useCallback((volume: number) => {
+    void setSiteVolume(Math.min(1, Math.max(0, volume)));
+  }, []);
+
+  const setBackCapture = useCallback((on: boolean) => {
+    void captureBack(on);
+  }, []);
+
   const openTestPage = useCallback(() => {
     void openUrl(TEST_PAGE_URL);
   }, [openUrl]);
@@ -171,6 +185,8 @@ export function useSiteController(): SiteController {
     nav,
     reload,
     applyPlayback,
+    setVolume,
+    setBackCapture,
     openTestPage,
     openYoutube,
     onEvent,

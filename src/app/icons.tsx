@@ -12,7 +12,14 @@ export type IconName =
   | 'users'
   | 'sync'
   | 'copy'
-  | 'close';
+  | 'close'
+  | 'mic'
+  | 'mic-off'
+  | 'chat'
+  | 'emoji'
+  | 'send'
+  | 'photo'
+  | 'history';
 
 interface IconProps {
   name: IconName;
@@ -127,6 +134,61 @@ export function Icon({ name, size = 20 }: IconProps) {
       return (
         <svg {...common}>
           <path d="m6 6 12 12M18 6 6 18" />
+        </svg>
+      );
+    case 'mic':
+      return (
+        <svg {...common}>
+          <rect x="9" y="3" width="6" height="11" rx="3" />
+          <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
+          <path d="M12 17.5V21M9 21h6" />
+        </svg>
+      );
+    case 'mic-off':
+      return (
+        <svg {...common}>
+          <rect x="9" y="3" width="6" height="11" rx="3" />
+          <path d="M5.5 11a6.5 6.5 0 0 0 10.2 5.3M18.5 11a6.5 6.5 0 0 1-.4 2.2" />
+          <path d="M12 17.5V21M9 21h6" />
+          <path d="m4 4 16 16" />
+        </svg>
+      );
+    case 'chat':
+      return (
+        <svg {...common}>
+          <path d="M20 15a3 3 0 0 1-3 3H9l-5 3V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3Z" />
+          <path d="M8 9h8M8 13h5" />
+        </svg>
+      );
+    case 'emoji':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8.5 14.5a4.5 4.5 0 0 0 7 0" />
+          <path d="M9 9.5h.01M15 9.5h.01" />
+        </svg>
+      );
+    case 'send':
+      return (
+        <svg {...common}>
+          <path d="M4 12 20 4l-7 16-2.5-6.5Z" />
+          <path d="m10.5 13.5 3.5-3.5" />
+        </svg>
+      );
+    case 'photo':
+      return (
+        <svg {...common}>
+          <rect x="3" y="5" width="18" height="14" rx="3" />
+          <circle cx="9" cy="10.5" r="1.6" />
+          <path d="m4.5 17 4.2-4a2 2 0 0 1 2.7 0l2.4 2.3 1.9-1.8a2 2 0 0 1 2.7 0l1.1 1" />
+        </svg>
+      );
+    case 'history':
+      return (
+        <svg {...common}>
+          <path d="M4 12a8 8 0 1 0 2.3-5.6" />
+          <path d="M4 5v4h4" />
+          <path d="M12 8v4.5l3 1.8" />
         </svg>
       );
     default:

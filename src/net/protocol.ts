@@ -160,6 +160,256 @@ export interface StateVersion {
   by: string;
 }
 
+// ---------- Чат комнаты, реакции и фото (§4.3, §4.7) ----------
+
+/** Лимит текста сообщения из §4.7. */
+export const CHAT_MAX_LENGTH = 4000;
+/** Антифлуд отправителя: не чаще одного сообщения в 120 мс. */
+export const CHAT_MIN_GAP_MS = 120;
+/** Состояние «печатает» живёт 4 секунды без обновления. */
+export const TYPING_TTL_MS = 4000;
+/** Реакция — одиночный эмодзи (возможны ZWJ-последовательности). */
+export const REACTION_MAX_LENGTH = 16;
+
+/** Чанк `hw-blob` — 16 КиБ, как в §4.7. */
+export const IMAGE_CHUNK_SIZE = 16 * 1024;
+/** После клиентского сжатия фото не больше 2 МБ. */
+export const IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+export const IMAGE_MAX_SIDE = 1280;
+export const IMAGE_PREVIEW_SIDE = 256;
+export const IMAGE_QUALITY = 0.8;
+export const IMAGE_TIMEOUT_MS = 30_000;
+export const IMAGE_MAX_CHUNKS = Math.ceil(IMAGE_MAX_BYTES / IMAGE_CHUNK_SIZE);
+export const IMAGE_MIN_BYTES = 64;
+
+export type ImageScope = 'chat' | 'dm';
+
+export interface ChatPayload {
+  text: string;
+  replyTo?: string;
+}
+
+export interface ReactionPayload {
+  emoji: string;
+  x?: number;
+  y?: number;
+}
+
+export interface TypingPayload {
+  on: boolean;
+}
+
+export interface ImageStartPayload {
+  id: string;
+  mime: string;
+  size: number;
+  w: number;
+  h: number;
+  chunks: number;
+  sha256: string;
+  scope: ImageScope;
+}
+
+export interface ImageChunkPayload {
+  id: string;
+  i: number;
+}
+
+export interface ImageEndPayload {
+  id: string;
+}
+
+export interface ImageCancelPayload {
+  id: string;
+  reason?: string;
+}
+
+/** Сообщение чата в том виде, в котором его показывает интерфейс. */
+export type ChatKind = 'text' | 'image';
+
+export interface ChatMessage {
+  id: string;
+  /** userId автора. */
+  from: string;
+  name: string;
+  color: string;
+  ts: number;
+  kind: ChatKind;
+  text?: string;
+  replyTo?: string;
+  imageId?: string;
+  imageW?: number;
+  imageH?: number;
+  /** Своё сообщение: показываем справа и без подписи. */
+  self?: boolean;
+  /** Фото ещё передаётся. */
+  pending?: boolean;
+  /** Доставка сорвалась — можно повторить. */
+  failed?: boolean;
+}
+
+export function imageChunkCount(size: number): number {
+  if (!Number.isFinite(size) || size <= 0) {
+    return 0;
+  }
+  return Math.ceil(size / IMAGE_CHUNK_SIZE);
+}
+
+/**
+ * Текст сообщения: обрезаем пробелы, выкидываем управляющие символы и
+ * ограничиваем длину. Пустой текст — null (отправлять нечего).
+ */
+export function normalizeChatText(raw: string): string | null {
+  const cleaned = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!cleaned) {
+    return null;
+  }
+  return cleaned.slice(0, CHAT_MAX_LENGTH);
+}
+
+/**
+ * Эмодзи-последовательность: пиктограммы, variation selector, ZWJ и модификаторы
+ * тона кожи. Буквы и цифры запрещены — реакцией нельзя прислать текст.
+ */
+export function isEmojiSequence(value: string): boolean {
+  if (!value || value.length > REACTION_MAX_LENGTH * 4) {
+    return false;
+  }
+  // В флагах нет Extended_Pictographic — только Regional_Indicator.
+  if (!/[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(value)) {
+    return false;
+  }
+  return /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\uFE0F|\u200D|[\u{1F3FB}-\u{1F3FF}])+$/u.test(
+    value,
+  );
+}
+
+export function isChatPayload(value: unknown): value is ChatPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.text !== 'string' || data.text.length === 0) {
+    return false;
+  }
+  if (data.text.length > CHAT_MAX_LENGTH) {
+    return false;
+  }
+  if (data.replyTo !== undefined && typeof data.replyTo !== 'string') {
+    return false;
+  }
+  return true;
+}
+
+export function isReactionPayload(value: unknown): value is ReactionPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.emoji !== 'string' || !isEmojiSequence(data.emoji)) {
+    return false;
+  }
+  for (const key of ['x', 'y'] as const) {
+    const coordinate = data[key];
+    if (coordinate !== undefined && (typeof coordinate !== 'number' || !Number.isFinite(coordinate))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isTypingPayload(value: unknown): value is TypingPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).on === 'boolean'
+  );
+}
+
+export function isImageStartPayload(value: unknown): value is ImageStartPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.id !== 'string' || data.id.length < 8 || data.id.length > 64) {
+    return false;
+  }
+  if (typeof data.mime !== 'string' || !/^image\/(png|jpeg|webp)$/.test(data.mime)) {
+    return false;
+  }
+  if (
+    typeof data.size !== 'number' ||
+    !Number.isInteger(data.size) ||
+    data.size < IMAGE_MIN_BYTES ||
+    data.size > IMAGE_MAX_BYTES
+  ) {
+    return false;
+  }
+  for (const key of ['w', 'h'] as const) {
+    const side = data[key];
+    if (typeof side !== 'number' || !Number.isInteger(side) || side < 1 || side > 8192) {
+      return false;
+    }
+  }
+  if (
+    typeof data.chunks !== 'number' ||
+    !Number.isInteger(data.chunks) ||
+    data.chunks !== imageChunkCount(data.size) ||
+    data.chunks > IMAGE_MAX_CHUNKS
+  ) {
+    return false;
+  }
+  if (typeof data.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(data.sha256)) {
+    return false;
+  }
+  if (data.scope !== 'chat' && data.scope !== 'dm') {
+    return false;
+  }
+  return true;
+}
+
+export function isImageChunkPayload(value: unknown): value is ImageChunkPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.id === 'string' &&
+    data.id.length >= 8 &&
+    typeof data.i === 'number' &&
+    Number.isInteger(data.i) &&
+    data.i >= 0 &&
+    data.i < IMAGE_MAX_CHUNKS
+  );
+}
+
+export function isImageEndPayload(value: unknown): value is ImageEndPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).id === 'string'
+  );
+}
+
+export function isImageCancelPayload(value: unknown): value is ImageCancelPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.id !== 'string') {
+    return false;
+  }
+  if (data.reason !== undefined && typeof data.reason !== 'string') {
+    return false;
+  }
+  return true;
+}
+
 // ---------- Канонизация и подписи ----------
 
 /**

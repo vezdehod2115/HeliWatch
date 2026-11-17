@@ -36,6 +36,8 @@ export interface SiteStatus {
   deepLink: DeepLink | null;
   /** Счётчик системных «назад» на корне истории — Shell решает, что делать. */
   backRootAt: number;
+  /** Системный back при открытой панели React (чат, эмодзи, фото). */
+  backOverlayAt: number;
 }
 
 /** Событие из Kotlin: нативное (nav/tap/...) либо обёрнутое событие страницы. */
@@ -46,7 +48,13 @@ export interface SiteEvent {
   [key: string]: unknown;
 }
 
-export type NavAction = 'back' | 'forward' | 'reload' | 'stop';
+export type NavAction =
+  | 'back'
+  | 'forward'
+  | 'reload'
+  | 'stop'
+  | 'back-capture-on'
+  | 'back-capture-off';
 
 export const EMPTY_STATUS: SiteStatus = {
   url: '',
@@ -69,4 +77,5 @@ export const EMPTY_STATUS: SiteStatus = {
   notice: null,
   deepLink: null,
   backRootAt: 0,
+  backOverlayAt: 0,
 };
