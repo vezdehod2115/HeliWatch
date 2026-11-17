@@ -143,4 +143,11 @@ describe('sessionPayload', () => {
     expect(payload.videoWidth).toBe(0);
     expect(payload.videoHeight).toBe(0);
   });
+
+  it('настройка PiP входит в снимок и меняет подпись (этап 7)', () => {
+    expect(sessionPayload(base).pipEnabled).toBe(true);
+    const disabled = sessionPayload({ ...base, pipEnabled: false });
+    expect(disabled.pipEnabled).toBe(false);
+    expect(sessionSignature(disabled)).not.toBe(sessionSignature(sessionPayload(base)));
+  });
 });

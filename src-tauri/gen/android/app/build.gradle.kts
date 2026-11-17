@@ -71,6 +71,9 @@ rust {
 }
 
 dependencies {
+    // HW:PATCH:PLUGIN-DEP (файловый кэш и бэкап этапа 7)
+    implementation(project(":tauri-plugin-fs"))
+    implementation(project(":tauri-plugin-dialog"))
     // HW:PATCH:PLUGIN-DEP (Kotlin-плагин HeliWatch)
     implementation(project(":tauri-plugin-heliwatch"))
     implementation("androidx.webkit:webkit:1.14.0")

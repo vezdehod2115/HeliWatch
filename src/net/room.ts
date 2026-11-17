@@ -12,7 +12,12 @@ import {
   planCorrection,
 } from './sync';
 import type { Identity } from './identity';
-import { publicKeyMatchesUserId, signEnvelope, verifyEnvelope } from './identity';
+import {
+  publicKeyMatchesUserId,
+  signEnvelope,
+  verifyEnvelope,
+  verifyEnvelopeWithUserId,
+} from './identity';
 import {
   CHAT_MAX_LENGTH,
   CHAT_MIN_GAP_MS,
@@ -25,8 +30,14 @@ import {
   createUlid,
   isCapabilityData,
   isChatPayload,
+  isDmAckPayload,
+  isDmMessagePayload,
+  isDmOutboxOfferPayload,
+  isDmOutboxSyncPayload,
   isEmojiSequence,
   isEnvelope,
+  isFriendCard,
+  isFriendRequestPayload,
   isHostClaimPayload,
   isHostTransferPayload,
   isImageCancelPayload,
@@ -55,7 +66,10 @@ import {
   type ByeData,
   type CapabilityData,
   type ChatMessage,
+  type DmMessagePayload,
   type Envelope,
+  type FriendAcceptPayload,
+  type FriendCard,
   type HelloData,
   type HostClaimPayload,
   type HostTransferPayload,
@@ -140,6 +154,15 @@ export type RoomEvent =
   | { type: 'chat'; message: ChatMessage }
   | { type: 'reaction'; from: string; name: string; emoji: string; x?: number; y?: number }
   | { type: 'typing'; from: string; name: string; on: boolean }
+  /** Пир прошёл авторизацию и готов принимать friend- и dm-сообщения (§4.3, этап 7). */
+  | { type: 'peer-ready'; peerId: string; userId: string }
+  | { type: 'friend-request'; from: string; card: FriendCard; note?: string }
+  | { type: 'friend-accepted'; from: string; card: FriendCard }
+  | { type: 'friend-removed'; from: string }
+  | { type: 'dm'; from: string; payload: DmMessagePayload; envelope: Envelope }
+  | { type: 'dm-ack'; from: string; msgId: string }
+  | { type: 'dm-outbox'; from: string; messages: Envelope[] }
+  | { type: 'dm-outbox-sync'; from: string; ids: string[] }
   | { type: 'image-start'; info: ImageTransferInfo }
   | { type: 'image-progress'; info: ImageTransferInfo }
   | {
@@ -153,8 +176,9 @@ export type RoomEvent =
       h: number;
       ts: number;
       bytes: Uint8Array;
+      scope: ImageScope;
     }
-  | { type: 'image-error'; id: string; reason: string }
+  | { type: 'image-error'; id: string; reason: string; scope?: ImageScope }
   | { type: 'voice-stream'; peerId: string; userId: string | null; stream: MediaStream }
   | {
       type: 'screen-stream';
@@ -209,6 +233,8 @@ interface PeerAuth {
   joined: boolean;
   /** Прошёл подпись, но ждёт решения хоста («стук»). */
   pending?: boolean;
+  /** `peer-ready` уже отправлен: не дублируем при повторных welcome. */
+  readyNotified?: boolean;
   profile?: ProfilePayload;
   joinedAt?: number;
   limiter: CommandRateLimiter;
@@ -420,9 +446,11 @@ export class RoomClient {
           h: image.h,
           ts: this.now(),
           bytes: image.bytes,
+          scope: image.scope,
         });
       },
-      onError: ({ id, reason }) => this.emit({ type: 'image-error', id, reason }),
+      onError: ({ id, reason, scope }) =>
+        this.emit({ type: 'image-error', id, reason, scope }),
       onReject: (id, peerId, reason) => this.send('image-cancel', { id, reason }, peerId),
     });
   }
@@ -937,6 +965,8 @@ export class RoomClient {
     handlers: {
       onProgress?: (sent: number, total: number) => void;
       scope?: ImageScope;
+      /** peerId получателя; без него — всем пирам. */
+      to?: string;
     } = {},
   ): { id: string; cancel: () => void; done: Promise<SendImageResult> } {
     const id = createUlid(this.now());
@@ -955,6 +985,7 @@ export class RoomClient {
       w: input.w,
       h: input.h,
       scope: handlers.scope ?? 'chat',
+      to: handlers.to,
       isCancelled: () => this.cancelledImages.has(id) || this.stopped,
       onProgress: handlers.onProgress,
     }).then((result) => {
@@ -976,6 +1007,75 @@ export class RoomClient {
   /** Отменить своё исходящее фото (кнопка «Отмена» в интерфейсе). */
   cancelImage(id: string): void {
     this.cancelledImages.add(id);
+  }
+
+  // ---------- Друзья и личные сообщения (этап 7) ----------
+
+  /** Есть ли авторизованный пир с этим userId: DM можно доставить сразу. */
+  hasPeer(userId: string): boolean {
+    return this.peerForUser(userId) !== null;
+  }
+
+  /** peerId авторизованного пира — DM-сервису для адресной отправки. */
+  peerIdFor(userId: string): string | null {
+    return this.peerForUser(userId)?.peerId ?? null;
+  }
+
+  /**
+   * Подписанный конверт друга или лички (§4.4). Возвращается, даже если пира
+   * нет: вызывающий положит его в outbox и доставит при встрече.
+   */
+  async createSigned(
+    type: string,
+    data: unknown,
+    toUserId: string,
+  ): Promise<Envelope | null> {
+    const envelope = createEnvelope(type, data, this.selfUserId, this.code, {
+      to: toUserId,
+      now: this.now(),
+    });
+    try {
+      envelope.sig = await signEnvelope(envelope, this.identity.privateJwk);
+    } catch (error) {
+      this.emit({
+        type: 'error',
+        message: `Не удалось подписать ${type}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+      return null;
+    }
+    return envelope;
+  }
+
+  /** Отправить готовый конверт: конкретному другу или всем пирам. */
+  sendEnvelope(envelope: Envelope, toUserId?: string): boolean {
+    if (!this.channelValue) {
+      return false;
+    }
+    if (toUserId === undefined) {
+      this.channelValue.send(envelope);
+      return true;
+    }
+    const peerId = this.peerIdFor(toUserId);
+    if (!peerId) {
+      return false;
+    }
+    this.channelValue.send(envelope, peerId);
+    return true;
+  }
+
+  /** Неподписанное служебное сообщение: dm-ack, dm-outbox-sync/offer. */
+  sendJson(type: string, data: unknown, toUserId?: string): boolean {
+    if (!this.channelValue || !toUserId) {
+      return false;
+    }
+    const peerId = this.peerIdFor(toUserId);
+    if (!peerId) {
+      return false;
+    }
+    this.send(type, data, peerId);
+    return true;
   }
 
   // ---------- Голос (§4.6) ----------
@@ -1366,6 +1466,29 @@ export class RoomClient {
       case 'typing':
         this.handleTyping(raw, peer);
         return;
+      case 'friend-request':
+        await this.handleFriendRequest(raw, peer);
+        return;
+      case 'friend-accept':
+        await this.handleFriendAccept(raw, peer);
+        return;
+      case 'friend-remove':
+        await this.handleFriendRemove(raw, peer);
+        return;
+      case 'dm-message':
+        await this.handleDmMessage(raw, peer);
+        return;
+      case 'dm-ack':
+        this.handleDmAck(raw, peer);
+        return;
+      case 'dm-outbox-offer':
+        await this.handleDmOutboxOffer(raw, peer);
+        return;
+      case 'dm-outbox-sync':
+        if (isDmOutboxSyncPayload(raw.d) && this.peerSocialAllowed(peer)) {
+          this.emit({ type: 'dm-outbox-sync', from: raw.from, ids: raw.d.ids });
+        }
+        return;
       case 'image-start':
         if (this.peerSocialAllowed(peer)) {
           this.images.start(peer.peerId, raw.d);
@@ -1455,6 +1578,125 @@ export class RoomClient {
     return peer.chatLimiter.allow(this.now());
   }
 
+  // ---------- Друзья и личка: приём (этап 7) ----------
+
+  /**
+   * `peer-ready`: пир авторизован и может принимать friend- и dm-сообщения. По этому
+   * событию DM-сервис предлагает накопленный outbox.
+   */
+  private markPeerReady(peerId: string): void {
+    const peer = this.peers.get(peerId);
+    if (!peer?.userId || !peer.joined || peer.readyNotified) {
+      return;
+    }
+    peer.readyNotified = true;
+    this.emit({ type: 'peer-ready', peerId, userId: peer.userId });
+  }
+
+  private async handleFriendRequest(
+    envelope: { from: string; d: unknown; sig?: string },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (!peer.pub || !isFriendRequestPayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    if (!(await verifyEnvelope(envelope as Envelope, peer.pub))) {
+      return;
+    }
+    const card: FriendCard = {
+      name: envelope.d.name,
+      color: envelope.d.color,
+      avatarHash: envelope.d.avatarHash,
+    };
+    this.emit({ type: 'friend-request', from: envelope.from, card, note: envelope.d.note });
+  }
+
+  private async handleFriendAccept(
+    envelope: { from: string; d: unknown; sig?: string },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (!peer.pub || !isFriendCard(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    if (!(await verifyEnvelope(envelope as Envelope, peer.pub))) {
+      return;
+    }
+    const card: FriendAcceptPayload = {
+      name: envelope.d.name,
+      color: envelope.d.color,
+      avatarHash: envelope.d.avatarHash,
+    };
+    this.emit({ type: 'friend-accepted', from: envelope.from, card });
+  }
+
+  private async handleFriendRemove(
+    envelope: { from: string; d: unknown; sig?: string },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (!peer.pub || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    if (!(await verifyEnvelope(envelope as Envelope, peer.pub))) {
+      return;
+    }
+    this.emit({ type: 'friend-removed', from: envelope.from });
+  }
+
+  private async handleDmMessage(
+    envelope: { from: string; d: unknown; sig?: string },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (!peer.pub || !isDmMessagePayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    if (!(await verifyEnvelope(envelope as Envelope, peer.pub))) {
+      return;
+    }
+    this.emit({
+      type: 'dm',
+      from: envelope.from,
+      payload: envelope.d,
+      envelope: envelope as Envelope,
+    });
+  }
+
+  private handleDmAck(
+    envelope: { from: string; d: unknown },
+    peer: PeerAuth,
+  ): void {
+    if (!isDmAckPayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    this.emit({ type: 'dm-ack', from: envelope.from, msgId: envelope.d.msgId });
+  }
+
+  /**
+   * Пачка недоставленного от друга. Подпись каждого конверта проверяется по
+   * userId: канал мог быть анонимным (парная/инвайт-комната), а конверты
+   * подписаны ключом отправителя.
+   */
+  private async handleDmOutboxOffer(
+    envelope: { from: string; d: unknown },
+    peer: PeerAuth,
+  ): Promise<void> {
+    if (!peer.userId || !isDmOutboxOfferPayload(envelope.d) || !this.peerSocialAllowed(peer)) {
+      return;
+    }
+    const accepted: Envelope[] = [];
+    for (const message of envelope.d.messages) {
+      if (message.from !== peer.userId || message.to !== this.selfUserId) {
+        continue;
+      }
+      if (!(await verifyEnvelopeWithUserId(message, message.from))) {
+        continue;
+      }
+      accepted.push(message);
+    }
+    if (accepted.length > 0) {
+      this.emit({ type: 'dm-outbox', from: peer.userId, messages: accepted });
+    }
+  }
+
   private handlePeerJoin(peerId: string): void {
     if (this.stopped || peerId === this.selfPeerId) {
       return;
@@ -1476,6 +1718,7 @@ export class RoomClient {
       existing.localNonceUsed = false;
       existing.host = false;
       existing.joined = false;
+      existing.readyNotified = false;
       existing.profile = undefined;
       existing.joinedAt = undefined;
       existing.limiter.reset();
@@ -1564,6 +1807,7 @@ export class RoomClient {
     if (this.members.has(data.userId)) {
       // Состав подтверждён хостом в welcome: сообщения этого пира принимаем.
       peer.joined = true;
+      this.markPeerReady(peerId);
     }
 
     if (!this.selfIsHost && data.host) {
@@ -1726,6 +1970,8 @@ export class RoomClient {
     // Остальные гости видят состав только через welcome: обновляем его.
     this.broadcastWelcome();
     await this.sendWelcome(peerId);
+    // Только после welcome: гость уже принял наш состав и ждёт friend- и dm-сообщения.
+    this.markPeerReady(peerId);
     // Поздно подключившийся зритель узнаёт о текущей раздаче и возможностях.
     if (this.streamActive && this.screenStream) {
       this.channelValue?.addScreenStream?.(this.screenStream, peerId);
@@ -1842,6 +2088,7 @@ export class RoomClient {
     this.stateReceivedAt = this.now();
     this.reconnects = 0;
     this.setPhase('joined');
+    this.markPeerReady(peerId);
     const pendingScreen = this.pendingScreens.get(peerId);
     if (pendingScreen) {
       this.pendingScreens.delete(peerId);
@@ -1906,6 +2153,7 @@ export class RoomClient {
       if (peer) {
         peer.joined = true;
         peer.userId = member.userId;
+        this.markPeerReady(member.peerId);
       }
     }
   }

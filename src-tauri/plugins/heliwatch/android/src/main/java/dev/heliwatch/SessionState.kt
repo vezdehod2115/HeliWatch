@@ -29,6 +29,9 @@ object SessionState {
   /** Окно PiP прямо сейчас на экране. */
   var pipActive = false
 
+  /** Настройка «автовход в PiP» (этап 7): false — PiP не открывается сам. */
+  var pipEnabled = true
+
   fun update(
     code: String? = null,
     title: String? = null,
@@ -38,6 +41,7 @@ object SessionState {
     message: String? = null,
     width: Int? = null,
     height: Int? = null,
+    pipEnabled: Boolean? = null,
   ) {
     if (code != null) {
       this.code = code
@@ -62,6 +66,9 @@ object SessionState {
     }
     if (height != null && height > 0) {
       this.videoHeight = height
+    }
+    if (pipEnabled != null) {
+      this.pipEnabled = pipEnabled
     }
   }
 
@@ -90,6 +97,7 @@ object SessionState {
     videoWidth = 16
     videoHeight = 9
     pipActive = false
+    pipEnabled = true
   }
 
   const val MIN_ASPECT = 0.42f

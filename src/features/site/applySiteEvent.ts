@@ -1,4 +1,4 @@
-import { normalizeRoomCode } from '../../net/protocol';
+import { normalizeRoomCode, parseFriendInput } from '../../net/protocol';
 import type { SiteEvent, SiteStatus, VideoInfo } from './types';
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -65,6 +65,21 @@ function applyPageEvent(
           at: Date.now(),
         },
       };
+    case 'age-gate': {
+      // Best effort: только подсказка «сайт просит подтвердить возраст».
+      if (!bool(data.detected, false)) {
+        return { ...state, ageGate: null };
+      }
+      return {
+        ...state,
+        ageGate: {
+          detected: true,
+          host: str(data.host),
+          hint: str(data.hint),
+          at: Date.now(),
+        },
+      };
+    }
     default: {
       // page-hook присылает remote-play/pause/seek/setRate после применения
       // команды из комнаты: это тоже снимок видео, обновляем состояние.
@@ -127,6 +142,10 @@ export function applySiteEvent(state: SiteStatus, event: SiteEvent): SiteStatus 
     case 'fullscreen':
       return { ...state, fullscreen: bool(event.on, false) };
     case 'deeplink': {
+      const userId = typeof event.friend === 'string' ? parseFriendInput(event.friend) : null;
+      if (userId) {
+        return { ...state, friendLink: { userId, at: Date.now() } };
+      }
       const code = normalizeRoomCode(str(event.code));
       return code ? { ...state, deepLink: { code, at: Date.now() } } : state;
     }

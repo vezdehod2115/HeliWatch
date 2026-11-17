@@ -53,6 +53,8 @@ object HeliWatchBridge {
   private var backArmedUntil = 0L
   private var backCaptured = false
   private val deepLinkPattern = Regex("""heliwatch://(?:r/)?([0-9A-Za-z]{6})""", RegexOption.IGNORE_CASE)
+  /** Этап 7: приглашение в друзья `heliwatch://f/<userId>` (base64url ключа). */
+  private val friendLinkPattern = Regex("""heliwatch://f/([A-Za-z0-9_-]{60,200})""", RegexOption.IGNORE_CASE)
 
   private val mainHandler = Handler(Looper.getMainLooper())
   private val pendingEvents = ArrayDeque<JSObject>()
@@ -74,6 +76,14 @@ object HeliWatchBridge {
   fun handleIntent(intent: Intent?) {
     val raw = intent?.dataString ?: return
     if (!raw.startsWith("heliwatch://", ignoreCase = true)) {
+      return
+    }
+    friendLinkPattern.find(raw)?.let { match ->
+      emitEvent(JSObject().apply {
+        put("t", "deeplink")
+        put("friend", match.groupValues[1])
+        put("url", raw)
+      })
       return
     }
     val match = deepLinkPattern.find(raw) ?: return
@@ -338,12 +348,21 @@ object HeliWatchBridge {
     // комната должна продолжать жить — будим оба WebView и таймеры процесса.
     TimerGuard.keepAlive()
     runCatching { CookieManager.getInstance().flush() }
+    // Этап 7: парная комната друзей закрывается, когда приложение ушло в фон.
+    emitEvent(JSObject().apply {
+      put("t", "app-state")
+      put("active", false)
+    })
   }
 
   fun onActivityResume() {
     TimerGuard.setForeground(true)
     siteRef?.onResume()
     pipRef?.apply()
+    emitEvent(JSObject().apply {
+      put("t", "app-state")
+      put("active", true)
+    })
   }
 
   /** После super.onStop(): WebView не должны замирать, пока комната активна. */
@@ -496,6 +515,7 @@ object HeliWatchBridge {
       message = if (state.has("message")) state.optString("message", SessionState.message) else null,
       width = state.optInt("videoWidth", 0).takeIf { it > 0 },
       height = state.optInt("videoHeight", 0).takeIf { it > 0 },
+      pipEnabled = if (state.has("pipEnabled")) state.optBoolean("pipEnabled", SessionState.pipEnabled) else null,
     )
     if (state.has("roomActive")) {
       SessionState.roomActive = state.optBoolean("roomActive", SessionState.roomActive)

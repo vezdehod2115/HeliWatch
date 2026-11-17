@@ -80,9 +80,7 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
    В `capabilities/default.json` нужны `sql:default` и `sql:allow-execute`:
    набор `sql:default` разрешает только load/select/close.
 
-## PiP и фон (этап 4)
-
-Свои компоненты объявлены в **библиотечном манифесте плагина**
+## PiP и фон (этап 4)Свои компоненты объявлены в **библиотечном манифесте плагина**
 (`plugins/heliwatch/android/src/main/AndroidManifest.xml`) — AGP смержит их сам:
 
 - `SessionService`: `foregroundServiceType="mediaPlayback|microphone"`,
@@ -122,6 +120,28 @@ adb shell dumpsys activity services dev.heliwatch.app.debug | Select-String "Ses
 # текущий режим Activity
 adb shell dumpsys activity activities | Select-String "pinned|PiP|mPictureInPicture"
 ```
+
+## Файлы, кэш и бэкап (этап 7)
+
+Кэш фото и аватаров, а также выбор файла бэкапа появились вместе с
+`tauri-plugin-fs` 2.7 и `tauri-plugin-dialog` 2.8:
+
+- **Кэш фото** — `$APPCACHE/heliwatch-media/<sha256>.jpg`, индекс в таблице
+  `media_cache`; LRU 200 МБ. **Аватары** — `$APPDATA/heliwatch-avatars/`, LRU 50
+  файлов / 5 МБ. Пути относительные, `baseDir` задаёт плагин.
+- **Права** (`src-tauri/capabilities/default.json`): `fs:allow-appcache-read-recursive`,
+  `fs:allow-appcache-write-recursive`, `fs:allow-appdata-read-recursive`,
+  `fs:allow-appdata-write-recursive`, `fs:allow-appdata-meta-recursive`,
+  `dialog:default`. Без них `writeFile`/`readFile` возвращают отказ, а кэш молча
+  пуст.
+- **Бэкап**: путь выбирает `plugin-dialog` (SAF на Android возвращает
+  `content://`), а файл пишет/читает `plugin-fs` — его Android-часть умеет
+  открывать content-URI через ContentResolver. Поэтому `backup.ts` вызывает
+  `writeTextFile`/`readTextFile`, а не `std::fs`: обычный путь к `content://`
+  не применим. Диалог добавляет выбранный файл в scope, прав на весь диск нет.
+- **Проверка на устройстве:** экспорт → файл открывается любым просмотрщиком
+  JSON; импорт «слить» не стирает локальных друзей; импорт «заменить» меняет
+  идентичность только при валидной паре ключей.
 
 ## Окружение (Windows, проверено)
 
@@ -194,9 +214,13 @@ zipalign -c -P 16 -v 4 <apk> | Select-String 'lib/arm64-v8a'
 `Failed to create a symbolic link ... jniLibs`. Плюс `cc`/`cl.exe` может не
 собрать C-часть `libsqlite3-sys` (SQLite-плагин) или `vswhom-sys` с
 debug-информацией (`D8050`). Поэтому сборка идёт с `CARGO_PROFILE_DEV_DEBUG=0`.
-Обход, которым собран APK 0.2.x:
+Обход, которым собран APK 0.2.x–0.7.x:
 
 ```powershell
+# 0. (этап 7) Дочерние build-скрипты из target не могут писать в .cargo
+#    на этой машине — уводим target во временный каталог вне репозитория.
+$env:CARGO_TARGET_DIR="$env:TEMP\heliwatch-target"
+
 # 1. Сборка dist + Rust для arm64. Ошибка symlink в конце ожидаема:
 $env:CARGO_PROFILE_DEV_DEBUG="0"
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-17.0.21.9-hotspot"
@@ -207,7 +231,7 @@ pnpm tauri android build --apk --debug
 # 2. Кладём .so в jniLibs вручную:
 $jni = "src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
 New-Item -ItemType Directory -Force $jni | Out-Null
-Copy-Item "src-tauri/target/aarch64-linux-android/debug/libheliwatch_lib.so" "$jni/" -Force
+Copy-Item "$env:TEMP\heliwatch-target\aarch64-linux-android\debug\libheliwatch_lib.so" "$jni/" -Force
 
 # 3. Gradle без rust-задач (они снова упрутся в symlink):
 .\src-tauri\gen\android\gradlew.bat -p src-tauri/gen/android assembleUniversalDebug `
@@ -215,10 +239,24 @@ Copy-Item "src-tauri/target/aarch64-linux-android/debug/libheliwatch_lib.so" "$j
   -x rustBuildX86Debug -x rustBuildX86_64Debug --console=plain
 ```
 
-Получится APK только для arm64-v8a. Если нужен эмулятор x86_64, соберите
+APK получится только для arm64-v8a. Если нужен эмулятор x86_64, соберите
 соответствующий Rust-таргет тем же способом и добавьте `.so` в
-`jniLibs/x86_64/`. Включение режима разработчика Windows или `mklink /H`
-не помогут: cargo-mobile2 создаёт именно символьную ссылку.
+`jniLibs/x86_64/`. Включение режима разработчика Windows или `mklink /H` не
+помогут: cargo-mobile2 создаёт именно символьную ссылку.
+
+Если CLI упал на symlink до генерации `tauri.build.gradle.kts`, в нём может не
+быть подключений плагинов. Для этапа 7 там должны быть:
+
+```kotlin
+dependencies {
+    implementation(project(":tauri-plugin-fs"))
+    implementation(project(":tauri-plugin-dialog"))
+}
+```
+
+Иначе Gradle не найдёт классы `tauri-plugin-fs`/`dialog` (сборка Kotlin упадёт
+на unresolved reference). `tauri.settings.gradle` CLI генерирует раньше и в нём
+эти плагины уже есть.
 
 ## Частые проблемы
 

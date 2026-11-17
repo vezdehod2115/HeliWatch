@@ -11,6 +11,7 @@
 
 import type { JoinRoomConfig, JsonValue } from 'trystero';
 import { APP_ID } from './protocol';
+import { buildRtcConfig } from './ice';
 import type { Channel } from './transport';
 
 export type StrategyId = 'nostr' | 'mqtt' | 'torrent';
@@ -24,8 +25,9 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
 };
 
 /**
- * ICE из §4.8: публичные STUN + best-effort TURN Open Relay. Свой TURN
- * появится в настройках на этапе 7; здесь достаточно рабочего дефолта.
+ * ICE из §4.8: публичные STUN + best-effort TURN Open Relay. Свой TURN и режим
+ * «только TURN» приходят из настроек этапа 7 (`net/ice.ts`) и добавляются к
+ * этому набору, а не заменяют его.
  */
 const ICE_SERVERS: RTCIceServer[] = [
   {
@@ -56,6 +58,14 @@ const ROOM_CONFIG: JoinRoomConfig = {
     warnOnRelayFailure: false,
   },
 };
+
+/** Конфиг на каждое подключение: TURN из настроек мог измениться. */
+function roomConfig(): JoinRoomConfig {
+  return {
+    ...ROOM_CONFIG,
+    rtcConfig: buildRtcConfig(ICE_SERVERS),
+  };
+}
 
 type ActionLike = {
   send: (data: JsonValue, options?: { target?: string }) => Promise<void>;
@@ -464,6 +474,6 @@ export async function connectTrystero(
   code: string,
 ): Promise<Channel> {
   const { module, getRelaySockets } = await loadStrategy(strategy);
-  const room = module.joinRoom(ROOM_CONFIG, code);
+  const room = module.joinRoom(roomConfig(), code);
   return new TrysteroChannel(strategy, room, module.selfId, getRelaySockets);
 }

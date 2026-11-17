@@ -152,3 +152,48 @@ export async function makePreviewDataUrl(bytes: Uint8Array, mime: string): Promi
 export function imageUrlFromBytes(bytes: Uint8Array, mime: string): string {
   return URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: mime }));
 }
+
+/**
+ * Аватар (§4.7, этап 7): 128×128 JPEG. Квадрат режем по центру, чтобы лицо не
+ * растягивалось; результат кладётся в файловый кэш `repo/media.ts`.
+ */
+export async function prepareAvatar(
+  file: File,
+  side = 128,
+): Promise<{ bytes: Uint8Array; mime: 'image/jpeg' }> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Это не изображение');
+  }
+  if (file.size > 24 * 1024 * 1024) {
+    throw new Error('Файл больше 24 МБ — выберите фото поменьше');
+  }
+  const bitmap = await loadBitmap(file);
+  try {
+    const source = Math.min(bitmap.width, bitmap.height);
+    const offsetX = Math.max(0, (bitmap.width - source) / 2);
+    const offsetY = Math.max(0, (bitmap.height - source) / 2);
+    const canvas = document.createElement('canvas');
+    canvas.width = side;
+    canvas.height = side;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Canvas недоступен на этом устройстве');
+    }
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(
+      bitmap as unknown as CanvasImageSource,
+      offsetX,
+      offsetY,
+      source,
+      source,
+      0,
+      0,
+      side,
+      side,
+    );
+    const blob = await canvasToBytes(canvas, 'image/jpeg', 0.85);
+    return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: 'image/jpeg' };
+  } finally {
+    bitmap.close?.();
+  }
+}

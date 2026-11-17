@@ -4,8 +4,8 @@
  * По умолчанию история НЕ пишется: правило «история — только по желанию».
  * Пользователь включает сохранение в панели чата, после чего сообщения комнаты
  * ложатся в SQLite и возвращаются при повторном входе в ту же комнату.
- * Фото в историю не попадают: они живут в памяти сессии до этапа 7 (LRU-кэш
- * файлов появится вместе с plugin-fs).
+ * С этапа 7 фото кэшируются в файловом LRU (200 МБ), а в истории остаётся
+ * `image_path` — по нему превью восстанавливается без повторной передачи.
  */
 
 import type { ChatMessage } from '../../net/protocol';
@@ -27,14 +27,18 @@ export interface StoredRoomMessage {
 export async function saveRoomMessage(
   roomCode: string,
   message: ChatMessage,
+  imagePath: string | null = null,
 ): Promise<boolean> {
-  if (message.kind === 'image' && !message.text) {
+  if (message.kind === 'text' && !message.text) {
+    return false;
+  }
+  if (message.kind === 'image' && !imagePath) {
     return false;
   }
   return executeSql(
     `INSERT INTO room_chat (id, room_code, ts, from_user_id, kind, body, image_path, saved)
      VALUES ($1, $2, $3, $4, $5, $6, $7, 1)
-     ON CONFLICT(id) DO UPDATE SET body = excluded.body, saved = 1`,
+     ON CONFLICT(id) DO UPDATE SET body = excluded.body, image_path = excluded.image_path, saved = 1`,
     [
       message.id,
       roomCode,
@@ -42,7 +46,7 @@ export async function saveRoomMessage(
       message.from,
       message.kind,
       message.text ?? '',
-      null,
+      imagePath,
     ],
   );
 }

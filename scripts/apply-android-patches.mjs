@@ -123,6 +123,16 @@ async function patchAppGradle() {
       );
     }
 
+    // Этап 7: plugin-fs и plugin-dialog — тоже отдельные Gradle-проекты.
+    // При сборке через CLI они попадают в tauri.build.gradle.kts, но прямой
+    // запуск Gradle (Windows без developer mode) читает только этот файл.
+    if (!next.includes(':tauri-plugin-fs')) {
+      next = next.replace(
+        'dependencies {\n',
+        'dependencies {\n    // HW:PATCH:PLUGIN-DEP (файловый кэш и бэкап этапа 7)\n    implementation(project(":tauri-plugin-fs"))\n    implementation(project(":tauri-plugin-dialog"))\n',
+      );
+    }
+
     return next;
   });
 

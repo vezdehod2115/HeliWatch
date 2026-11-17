@@ -133,6 +133,8 @@ export interface SessionPayloadInput {
   message?: string;
   videoWidth?: number;
   videoHeight?: number;
+  /** Автовход в PiP из настроек (§4.8, этап 7). По умолчанию включён. */
+  pipEnabled?: boolean;
 }
 
 /** Снимок для Kotlin: сервис, уведомление и параметры PiP. */
@@ -146,6 +148,7 @@ export interface SessionPayload {
   message: string;
   videoWidth: number;
   videoHeight: number;
+  pipEnabled: boolean;
 }
 
 export function sessionPayload(input: SessionPayloadInput): SessionPayload {
@@ -159,6 +162,7 @@ export function sessionPayload(input: SessionPayloadInput): SessionPayload {
     message: (input.message ?? '').replace(/\s+/g, ' ').slice(0, 140),
     videoWidth: Math.max(0, Math.round(input.videoWidth ?? 0)),
     videoHeight: Math.max(0, Math.round(input.videoHeight ?? 0)),
+    pipEnabled: input.pipEnabled !== false,
   };
 }
 
@@ -174,5 +178,6 @@ export function sessionSignature(payload: SessionPayload): string {
     payload.message,
     payload.videoWidth,
     payload.videoHeight,
+    payload.pipEnabled ? '1' : '0',
   ].join('|');
 }

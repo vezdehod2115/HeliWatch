@@ -24,6 +24,20 @@ export interface DeepLink {
   at: number;
 }
 
+/** Ссылка-приглашение в друзья из deep link `heliwatch://f/<userId>`. */
+export interface FriendDeepLink {
+  userId: string;
+  at: number;
+}
+
+/** Age-gate на сайте (best effort, этап 7): только подсказка, без обхода. */
+export interface AgeGateInfo {
+  detected: boolean;
+  host: string;
+  hint: string;
+  at: number;
+}
+
 export interface SiteStatus {
   url: string;
   title: string;
@@ -37,10 +51,14 @@ export interface SiteStatus {
   notice: SiteNotice | null;
   /** Код из ссылки heliwatch://r/<code>, пришедшей в Activity. */
   deepLink: DeepLink | null;
+  /** userId из ссылки heliwatch://f/<userId>: заявка в друзья. */
+  friendLink: FriendDeepLink | null;
   /** Счётчик системных «назад» на корне истории — Shell решает, что делать. */
   backRootAt: number;
   /** Системный back при открытой панели React (чат, эмодзи, фото). */
   backOverlayAt: number;
+  /** Сайт просит подтвердить возраст: подсказка поверх видео. */
+  ageGate: AgeGateInfo | null;
 }
 
 /** Событие из Kotlin: нативное (nav/tap/...) либо обёрнутое событие страницы. */
@@ -81,6 +99,8 @@ export const EMPTY_STATUS: SiteStatus = {
   lastTap: null,
   notice: null,
   deepLink: null,
+  friendLink: null,
   backRootAt: 0,
   backOverlayAt: 0,
+  ageGate: null,
 };

@@ -3,8 +3,36 @@
  * Tailwind v4 читает @theme и генерирует утилиты (bg-hw-surface, text-hw-ink, ...).
  * Здесь же живут переменные для анимаций и безопасных зон экрана.
  * Тема меняется в одном месте — этот файл.
+ *
+ * Акцент (`--hw-accent*`) — единственный токен, который меняется в рантайме:
+ * этап 7 подставляет цвет из кадра видео (§2.5). Всё остальное статично.
  */
 @import 'tailwindcss';
+
+/* Плавная смена акцента: 700 мс по §2.5 (в Chromium custom property
+ * интерполируется, если зарегистрирована через @property). */
+@property --hw-accent-rgb {
+  syntax: '<number>+';
+  inherits: true;
+  initial-value: 111 240 196;
+}
+
+:root {
+  color-scheme: dark;
+  --hw-accent-rgb: 111 240 196;
+  --hw-accent: rgb(var(--hw-accent-rgb));
+  --hw-accent-soft: rgb(var(--hw-accent-rgb) / 0.12);
+  --hw-accent-deep: color-mix(in srgb, var(--hw-accent) 72%, #000);
+  --hw-safe-top: env(safe-area-inset-top, 0px);
+  --hw-safe-right: env(safe-area-inset-right, 0px);
+  --hw-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --hw-safe-left: env(safe-area-inset-left, 0px);
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+  --ease-hw: cubic-bezier(0.22, 1, 0.36, 1);
+  transition: --hw-accent-rgb 700ms var(--ease-hw);
+}
 
 @theme {
   --color-hw-bg: #06201d;
@@ -14,11 +42,11 @@
   --color-hw-ink: #e9fffa;
   --color-hw-muted: #9dbfb7;
   --color-hw-dim: #63857d;
-  --color-hw-accent: #6ff0c4;
-  --color-hw-accent-deep: #2fcf9d;
-  --color-hw-accent-soft: rgb(111 240 196 / 0.12);
-  --color-hw-line: rgb(111 240 196 / 0.16);
-  --color-hw-line-strong: rgb(111 240 196 / 0.34);
+  --color-hw-accent: var(--hw-accent);
+  --color-hw-accent-deep: var(--hw-accent-deep);
+  --color-hw-accent-soft: var(--hw-accent-soft);
+  --color-hw-line: rgb(var(--hw-accent-rgb) / 0.16);
+  --color-hw-line-strong: rgb(var(--hw-accent-rgb) / 0.34);
   --color-hw-danger: #ff8494;
   --color-hw-warning: #ffd166;
 
@@ -29,17 +57,6 @@
   --radius-hw-xl: 30px;
 
   --shadow-hw-panel: 0 18px 50px rgb(0 0 0 / 0.45);
-  --shadow-hw-glow: 0 0 0 1px rgb(111 240 196 / 0.10), 0 10px 30px rgb(111 240 196 / 0.08);
-}
-
-:root {
-  color-scheme: dark;
-  --hw-safe-top: env(safe-area-inset-top, 0px);
-  --hw-safe-right: env(safe-area-inset-right, 0px);
-  --hw-safe-bottom: env(safe-area-inset-bottom, 0px);
-  --hw-safe-left: env(safe-area-inset-left, 0px);
-  --duration-fast: 150ms;
-  --duration-base: 200ms;
-  --duration-slow: 250ms;
-  --ease-hw: cubic-bezier(0.22, 1, 0.36, 1);
+  --shadow-hw-glow: 0 0 0 1px rgb(var(--hw-accent-rgb) / 0.10),
+    0 10px 30px rgb(var(--hw-accent-rgb) / 0.08);
 }

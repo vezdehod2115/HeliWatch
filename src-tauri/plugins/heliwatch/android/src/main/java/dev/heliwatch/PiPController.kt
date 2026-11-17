@@ -79,6 +79,10 @@ class PiPController(
       lastError = "Сначала войдите в комнату"
       return false
     }
+    if (!SessionState.pipEnabled) {
+      lastError = "PiP выключен в настройках HeliWatch"
+      return false
+    }
     if (activity.isFinishing || activity.isDestroyed) {
       return false
     }
@@ -102,7 +106,7 @@ class PiPController(
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       return
     }
-    if (!SessionState.roomActive || isInPip) {
+    if (!SessionState.roomActive || !SessionState.pipEnabled || isInPip) {
       return
     }
     enter()
@@ -164,7 +168,7 @@ class PiPController(
     }
     builder.setActions(buildActions())
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      builder.setAutoEnterEnabled(SessionState.roomActive)
+      builder.setAutoEnterEnabled(SessionState.roomActive && SessionState.pipEnabled)
       builder.setSeamlessResizeEnabled(false)
     }
     return builder.build()

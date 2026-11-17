@@ -10,6 +10,8 @@ import {
 import {
   normalizeDisplayName,
   updateDisplayName,
+  updateNameColor,
+  updateProfileAvatar,
 } from '../db/repo/profile';
 import type { Identity } from '../net/identity';
 
@@ -22,7 +24,10 @@ interface ProfileState {
   persisted: boolean;
   error: string | null;
   load: () => Promise<void>;
+  reload: () => Promise<void>;
   rename: (raw: string) => Promise<boolean>;
+  setColor: (color: string) => Promise<boolean>;
+  setAvatar: (hash: string | null) => Promise<boolean>;
 }
 
 export const useProfileStore = create<ProfileState>((set, get) => ({
@@ -66,6 +71,38 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     set({
       profile: { ...state.profile, displayName: name },
     });
+    return true;
+  },
+
+  reload: async () => {
+    set({ status: 'idle', error: null });
+    await get().load();
+  },
+
+  setColor: async (color: string) => {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) {
+      return false;
+    }
+    const state = get();
+    if (!state.profile) {
+      return false;
+    }
+    if (state.persisted) {
+      await updateNameColor(color);
+    }
+    set({ profile: { ...state.profile, nameColor: color } });
+    return true;
+  },
+
+  setAvatar: async (hash: string | null) => {
+    const state = get();
+    if (!state.profile) {
+      return false;
+    }
+    if (state.persisted) {
+      await updateProfileAvatar(hash);
+    }
+    set({ profile: { ...state.profile, avatarHash: hash } });
     return true;
   },
 }));

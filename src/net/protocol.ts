@@ -646,7 +646,7 @@ export const IMAGE_TIMEOUT_MS = 30_000;
 export const IMAGE_MAX_CHUNKS = Math.ceil(IMAGE_MAX_BYTES / IMAGE_CHUNK_SIZE);
 export const IMAGE_MIN_BYTES = 64;
 
-export type ImageScope = 'chat' | 'dm';
+export type ImageScope = 'chat' | 'dm' | 'avatar';
 
 export interface ChatPayload {
   text: string;
@@ -831,7 +831,7 @@ export function isImageStartPayload(value: unknown): value is ImageStartPayload 
   if (typeof data.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(data.sha256)) {
     return false;
   }
-  if (data.scope !== 'chat' && data.scope !== 'dm') {
+  if (data.scope !== 'chat' && data.scope !== 'dm' && data.scope !== 'avatar') {
     return false;
   }
   return true;
@@ -872,6 +872,209 @@ export function isImageCancelPayload(value: unknown): value is ImageCancelPayloa
     return false;
   }
   return true;
+}
+
+// ---------- Друзья и личные сообщения (этап 7) ----------
+
+/** Текст личного сообщения — тот же предел, что и у чата комнаты (§4.7). */
+export const DM_TEXT_MAX = CHAT_MAX_LENGTH;
+/** Записка к заявке в друзья: короткая, чтобы не превращалась в чат. */
+export const FRIEND_NOTE_MAX = 120;
+/** Ссылка-приглашение в друзья: `heliwatch://f/<userId>`. */
+export const FRIEND_LINK_PREFIX = 'heliwatch://f/';
+/** userId — base64url(SPKI DER P-256); короче 60 символов не бывает. */
+export const USER_ID_MIN = 60;
+export const USER_ID_MAX = 200;
+/** Пачка outbox за одно рукопожатие: больше не нужно, канал не резиновый. */
+export const DM_OUTBOX_MAX = 50;
+
+/** Карточка человека в friend-request / friend-accept. */
+export interface FriendCard {
+  name: string;
+  color: string;
+  avatarHash?: string;
+}
+
+export interface FriendRequestPayload extends FriendCard {
+  note?: string;
+}
+
+export type FriendAcceptPayload = FriendCard;
+
+/** `dm-message` (§4.3): текст или ссылка на уже переданное фото. */
+export interface DmMessagePayload {
+  msgId: string;
+  kind: 'text' | 'image';
+  text?: string;
+  imageId?: string;
+  ts: number;
+}
+
+export interface DmAckPayload {
+  msgId: string;
+  ts?: number;
+}
+
+/** `dm-outbox-sync`: «есть ли у тебя эти сообщения?» — ids, которые ждут ack. */
+export interface DmOutboxSyncPayload {
+  ids: string[];
+}
+
+/**
+ * `dm-outbox-offer`: недоставленные подписанные конверты. Получатель проверяет
+ * подпись каждого и не доверяет отправителю канала на слово (§4.4).
+ */
+export interface DmOutboxOfferPayload {
+  messages: Envelope[];
+}
+
+export function isUserId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= USER_ID_MIN &&
+    value.length <= USER_ID_MAX &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+export function isFriendCard(value: unknown): value is FriendCard {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.name !== 'string') {
+    return false;
+  }
+  const name = data.name.trim();
+  if (name.length < 1 || name.length > 24) {
+    return false;
+  }
+  if (typeof data.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(data.color)) {
+    return false;
+  }
+  if (
+    data.avatarHash !== undefined &&
+    (typeof data.avatarHash !== 'string' || data.avatarHash.length > 128)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isFriendRequestPayload(value: unknown): value is FriendRequestPayload {
+  if (!isFriendCard(value)) {
+    return false;
+  }
+  const note = (value as FriendRequestPayload).note;
+  return note === undefined || (typeof note === 'string' && note.length <= FRIEND_NOTE_MAX);
+}
+
+export function isDmMessagePayload(value: unknown): value is DmMessagePayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.msgId !== 'string' || data.msgId.length < 10 || data.msgId.length > 64) {
+    return false;
+  }
+  if (typeof data.ts !== 'number' || !Number.isFinite(data.ts) || data.ts <= 0) {
+    return false;
+  }
+  if (data.kind === 'text') {
+    return (
+      typeof data.text === 'string' &&
+      data.text.trim().length > 0 &&
+      data.text.length <= DM_TEXT_MAX &&
+      data.imageId === undefined
+    );
+  }
+  if (data.kind === 'image') {
+    return (
+      typeof data.imageId === 'string' &&
+      data.imageId.length >= 8 &&
+      data.imageId.length <= 64 &&
+      data.text === undefined
+    );
+  }
+  return false;
+}
+
+export function isDmAckPayload(value: unknown): value is DmAckPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.msgId !== 'string' || data.msgId.length < 10 || data.msgId.length > 64) {
+    return false;
+  }
+  return data.ts === undefined || (typeof data.ts === 'number' && Number.isFinite(data.ts));
+}
+
+export function isDmOutboxSyncPayload(value: unknown): value is DmOutboxSyncPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const ids = (value as Record<string, unknown>).ids;
+  return (
+    Array.isArray(ids) &&
+    ids.length <= DM_OUTBOX_MAX &&
+    ids.every((id) => typeof id === 'string' && id.length >= 10 && id.length <= 64)
+  );
+}
+
+export function isDmOutboxOfferPayload(value: unknown): value is DmOutboxOfferPayload {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const messages = (value as Record<string, unknown>).messages;
+  if (!Array.isArray(messages) || messages.length === 0 || messages.length > DM_OUTBOX_MAX) {
+    return false;
+  }
+  return messages.every(
+    (item) => isEnvelope(item) && typeof (item as Envelope).sig === 'string',
+  );
+}
+
+/** Ссылка-приглашение в друзья: тот же формат deep link, что и у комнаты. */
+export function friendInviteLink(userId: string): string {
+  return `${FRIEND_LINK_PREFIX}${userId}`;
+}
+
+/**
+ * Принимает ссылку `heliwatch://f/<userId>` (в том числе вставленную внутри
+ * текста мессенджера) или сам userId. Возвращает userId либо null.
+ */
+export function parseFriendInput(raw: string): string | null {
+  const value = raw.trim();
+  if (!value) {
+    return null;
+  }
+  const match = value.match(/heliwatch:\/\/f\/([A-Za-z0-9_-]{60,200})/i);
+  if (match?.[1] && isUserId(match[1])) {
+    return match[1];
+  }
+  const compact = value.replace(/\s+/g, '');
+  return isUserId(compact) ? compact : null;
+}
+
+/**
+ * Идентификатор парной комнаты друзей (§4.8): фиксированный для пары,
+ * не зависит от того, кто открыл её первым. `dm-<hash>` вместо `dm:` — чтобы
+ * не спорить с разделителями релеев, смысл тот же.
+ */
+export async function pairRoomId(left: string, right: string): Promise<string> {
+  const [first, second] = [left, right].sort();
+  const digest = await sha256Base64Url(`heliwatch/dm/v1\n${first}\n${second}`);
+  return `dm-${digest.slice(0, 24)}`;
+}
+
+/**
+ * Комната ожидания приглашения: ссылка знает только userId пригласившего,
+ * поэтому комната производна от него. Кто открыл ссылку — подключается сюда.
+ */
+export async function inviteRoomId(userId: string): Promise<string> {
+  const digest = await sha256Base64Url(`heliwatch/invite/v1\n${userId}`);
+  return `invite-${digest.slice(0, 24)}`;
 }
 
 // ---------- Канонизация и подписи ----------

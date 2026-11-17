@@ -190,6 +190,8 @@ export interface IncomingImage {
   w: number;
   h: number;
   bytes: Uint8Array;
+  /** Чат комнаты или личка: UI не должен смешивать эти потоки. */
+  scope: ImageScope;
 }
 
 export interface ImageTransferInfo {
@@ -201,6 +203,7 @@ export interface ImageTransferInfo {
   size: number;
   chunks: number;
   received: number;
+  scope: ImageScope;
 }
 
 export interface ImageReceiverOptions {
@@ -208,7 +211,7 @@ export interface ImageReceiverOptions {
   onStart?: (info: ImageTransferInfo) => void;
   onProgress?: (info: ImageTransferInfo) => void;
   onComplete?: (image: IncomingImage) => void;
-  onError?: (info: { id: string; fromPeer: string; reason: string }) => void;
+  onError?: (info: { id: string; fromPeer: string; reason: string; scope?: ImageScope }) => void;
   /** Попросить отправителя остановиться (проверка SHA-256 не прошла). */
   onReject?: (id: string, fromPeer: string, reason: string) => void;
 }
@@ -344,7 +347,12 @@ export class ImageReceiver {
       return;
     }
     this.finish(transfer);
-    this.options.onError?.({ id, fromPeer, reason: 'cancelled' });
+    this.options.onError?.({
+      id: transfer.meta.id,
+      fromPeer: transfer.fromPeer,
+      reason: 'cancelled',
+      scope: transfer.meta.scope,
+    });
   }
 
   dispose(): void {
@@ -380,12 +388,18 @@ export class ImageReceiver {
       w: transfer.meta.w,
       h: transfer.meta.h,
       bytes,
+      scope: transfer.meta.scope,
     });
   }
 
   private fail(transfer: Transfer, reason: string): void {
     this.finish(transfer);
-    this.options.onError?.({ id: transfer.meta.id, fromPeer: transfer.fromPeer, reason });
+    this.options.onError?.({
+      id: transfer.meta.id,
+      fromPeer: transfer.fromPeer,
+      reason,
+      scope: transfer.meta.scope,
+    });
     this.options.onReject?.(transfer.meta.id, transfer.fromPeer, reason);
   }
 
@@ -413,6 +427,7 @@ export class ImageReceiver {
       size: transfer.meta.size,
       chunks: transfer.meta.chunks,
       received: transfer.receivedBytes,
+      scope: transfer.meta.scope,
     };
   }
 }

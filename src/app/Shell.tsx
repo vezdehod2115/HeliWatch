@@ -4,12 +4,22 @@ import { type RoomSetup } from '../features/lobby/types';
 import { RoomScreen } from '../features/room/RoomScreen';
 import { DebugZones } from '../features/site/DebugZones';
 import { useSiteController } from '../features/site/useSiteController';
+import { FriendsScreen } from '../features/friends/FriendsScreen';
+import { DmScreen } from '../features/dm/DmScreen';
+import { ProfileScreen } from '../features/profile/ProfileScreen';
+import { StatsScreen } from '../features/stats/StatsScreen';
+import { SettingsScreen } from '../features/settings/SettingsScreen';
+import { AboutScreen } from '../features/about/AboutScreen';
 import { startRegionSync, type RegionPayload } from '../native/regions';
-import {
-  touchRecentRoom,
-} from '../db/repo/rooms';
+import { touchRecentRoom } from '../db/repo/rooms';
+import { closeStaleSessions } from '../db/repo/stats';
+import { pruneOutbox } from '../db/repo/outbox';
 import { generateRoomCode, type RoomMode, type RoomRole } from '../net/protocol';
+import { closeAllDmChannels } from '../net/dmChannels';
 import { useProfileStore } from '../stores/profile';
+import { useFriendsStore } from '../stores/friends';
+import { useSettingsStore } from '../stores/settings';
+import { setAccentEnabled, startAccentTicker } from '../media/accentRuntime';
 import { BrandMark } from './icons';
 
 type Screen =
@@ -21,11 +31,17 @@ type Screen =
       mode: RoomMode | null;
       setup: RoomSetup | null;
       password: string | null;
-    };
+    }
+  | { name: 'friends'; inviteUserId: string | null }
+  | { name: 'dm'; peerUserId: string | null }
+  | { name: 'profile' }
+  | { name: 'stats' }
+  | { name: 'settings' }
+  | { name: 'about' };
 
 const TOAST_MS = 3400;
 
-/** Корень приложения: главная, комната, зоны касания и уведомления. */
+/** Корень приложения: главная, комната, друзья/личка и настройки. */
 export function Shell() {
   const site = useSiteController();
   const profileStatus = useProfileStore((state) => state.status);
@@ -36,6 +52,17 @@ export function Shell() {
   const loadProfile = useProfileStore((state) => state.load);
   const rename = useProfileStore((state) => state.rename);
 
+  const loadSettings = useSettingsStore((state) => state.load);
+  const settingsStatus = useSettingsStore((state) => state.status);
+  const accentEnabled = useSettingsStore((state) => state.accentEnabled);
+  const chatOpacity = useSettingsStore((state) => state.chatOpacity);
+
+  const friendsCount = useFriendsStore((state) => state.friends.length);
+  const pendingFriends = useFriendsStore((state) => state.requests.length);
+  const unreadDm = useFriendsStore((state) => state.unreadTotal);
+  const refreshFriends = useFriendsStore((state) => state.refresh);
+  const loadFriends = useFriendsStore((state) => state.load);
+
   const [screen, setScreen] = useState<Screen>({ name: 'home' });
   const [zonesOpen, setZonesOpen] = useState(false);
   const [regionPayload, setRegionPayload] = useState<RegionPayload | null>(null);
@@ -43,8 +70,11 @@ export function Shell() {
   const [deepPrefill, setDeepPrefill] = useState<{ code: string; at: number } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const lastDeepAt = useRef(0);
+  const lastFriendLinkAt = useRef(0);
   const lastNoticeAt = useRef(0);
   const backRootSeen = useRef(site.status.backRootAt);
+  const backOverlaySeen = useRef(site.status.backOverlayAt);
+  const staleChecked = useRef(false);
   const screenRef = useRef(screen);
   screenRef.current = screen;
 
@@ -61,7 +91,44 @@ export function Shell() {
 
   useEffect(() => {
     void loadProfile();
-  }, [loadProfile]);
+    void loadSettings();
+    void loadFriends();
+  }, [loadProfile, loadSettings, loadFriends]);
+
+  // Сессии, оборванные прошлым запуском, закрываем временем heartbeat (§5).
+  useEffect(() => {
+    if (staleChecked.current) {
+      return;
+    }
+    staleChecked.current = true;
+    void pruneOutbox().catch(() => undefined);
+    void closeStaleSessions().then((count) => {
+      if (count > 0) {
+        notify(`Закрыто сессий после обрыва: ${count}`);
+      }
+    });
+  }, [notify]);
+
+  // Акцент (§2.5): настройка + тикер простоя. Кадры приходят из комнаты.
+  useEffect(() => {
+    if (settingsStatus !== 'ready') {
+      return;
+    }
+    setAccentEnabled(accentEnabled);
+  }, [settingsStatus, accentEnabled]);
+
+  useEffect(() => {
+    const stop = startAccentTicker();
+    return stop;
+  }, []);
+
+  // Прозрачность панели чата — одна CSS-переменная.
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      '--hw-chat-alpha',
+      String(Math.min(1, Math.max(0.55, chatOpacity))),
+    );
+  }, [chatOpacity]);
 
   useEffect(
     () => () => {
@@ -84,6 +151,17 @@ export function Shell() {
     }
   }, [notice, notify]);
 
+  // Приложение ушло в фон: парные и инвайт-комнаты закрываются (§4.8).
+  useEffect(
+    () =>
+      site.onEvent((event) => {
+        if (event.t === 'app-state' && event.active === false) {
+          closeAllDmChannels();
+        }
+      }),
+    [site],
+  );
+
   // Ссылка heliwatch://r/<code>: на главной подставляем код, в комнате игнорируем.
   const deepLink = site.status.deepLink;
   useEffect(() => {
@@ -95,9 +173,20 @@ export function Shell() {
       setDeepPrefill(deepLink);
       notify(`Код из ссылки: ${deepLink.code}`);
     } else {
-      notify('Ссылка получена, но вы уже в комнате');
+      notify('Ссылка получена, но вы уже вне главной');
     }
   }, [deepLink, notify]);
+
+  // Ссылка-приглашение heliwatch://f/<userId>: открываем друзей с подстановкой.
+  const friendLink = site.status.friendLink;
+  useEffect(() => {
+    if (!friendLink || friendLink.at === lastFriendLinkAt.current) {
+      return;
+    }
+    lastFriendLinkAt.current = friendLink.at;
+    setScreen({ name: 'friends', inviteUserId: friendLink.userId });
+    notify('Приглашение в друзья: отправьте заявку');
+  }, [friendLink, notify]);
 
   // Системный back: в комнате выходим, на главной снова показываем подсказку.
   useEffect(() => {
@@ -110,9 +199,38 @@ export function Shell() {
     }
   }, [site.status.backRootAt, notify]);
 
+  const subScreen = screen.name !== 'home' && screen.name !== 'room';
+
+  // Back на обычных экранах: перехватываем у истории сайта, пока экран открыт.
+  useEffect(() => {
+    if (!subScreen) {
+      return;
+    }
+    site.setBackCapture(true);
+    return () => {
+      site.setBackCapture(false);
+    };
+  }, [subScreen, site]);
+
+  useEffect(() => {
+    if (site.status.backOverlayAt <= backOverlaySeen.current) {
+      return;
+    }
+    backOverlaySeen.current = site.status.backOverlayAt;
+    if (screenRef.current.name !== 'home' && screenRef.current.name !== 'room') {
+      setScreen({ name: 'home' });
+    }
+  }, [site.status.backOverlayAt]);
+
+  // Бейджи друзей обновляем при возвращении на главную.
+  useEffect(() => {
+    if (screen.name === 'home') {
+      void refreshFriends();
+    }
+  }, [screen.name, refreshFriends]);
+
   // Зоны касания: пересчёт при смене экрана и после анимаций панелей.
-  const screenKey =
-    screen.name === 'room' ? `room:${screen.code}:${screen.role}` : 'home';
+  const screenKey = screen.name === 'room' ? `room:${screen.code}:${screen.role}` : screen.name;
   useEffect(
     () =>
       startRegionSync(
@@ -136,21 +254,18 @@ export function Shell() {
     setScreen({ name: 'home' });
   }, [notify]);
 
-  const createRoom = useCallback(
-    (setup: RoomSetup) => {
-      const code = generateRoomCode();
-      void touchRecentRoom(code, setup.mode).catch(() => undefined);
-      setScreen({
-        name: 'room',
-        code,
-        role: 'host',
-        mode: setup.mode,
-        setup,
-        password: setup.password,
-      });
-    },
-    [],
-  );
+  const createRoom = useCallback((setup: RoomSetup) => {
+    const code = generateRoomCode();
+    void touchRecentRoom(code, setup.mode).catch(() => undefined);
+    setScreen({
+      name: 'room',
+      code,
+      role: 'host',
+      mode: setup.mode,
+      setup,
+      password: setup.password,
+    });
+  }, []);
 
   const joinRoom = useCallback((code: string, password: string | null) => {
     setScreen({
@@ -178,6 +293,8 @@ export function Shell() {
     void touchRecentRoom(code, mode).catch(() => undefined);
   }, []);
 
+  const goHome = useCallback(() => setScreen({ name: 'home' }), []);
+
   if (profileStatus !== 'ready' || !identity || !profile) {
     return (
       <div className="hw-app">
@@ -203,7 +320,7 @@ export function Shell() {
 
   return (
     <div className="hw-app">
-      {screen.name === 'home' ? (
+      {screen.name === 'home' && (
         <HomeScreen
           identity={identity}
           profile={profile}
@@ -215,8 +332,66 @@ export function Shell() {
           onRename={rename}
           onCodeConsumed={() => setDeepPrefill(null)}
           notify={notify}
+          onOpenFriends={() => setScreen({ name: 'friends', inviteUserId: null })}
+          onOpenDm={() => setScreen({ name: 'dm', peerUserId: null })}
+          onOpenStats={() => setScreen({ name: 'stats' })}
+          onOpenSettings={() => setScreen({ name: 'settings' })}
+          onOpenProfile={() => setScreen({ name: 'profile' })}
+          friendsCount={friendsCount}
+          pendingFriends={pendingFriends}
+          unreadDm={unreadDm}
         />
-      ) : (
+      )}
+
+      {screen.name === 'friends' && (
+        <FriendsScreen
+          identity={identity}
+          profile={profile}
+          initialInviteUserId={screen.inviteUserId}
+          onBack={goHome}
+          onOpenDm={(peerUserId) => setScreen({ name: 'dm', peerUserId })}
+          onOpenProfile={() => setScreen({ name: 'profile' })}
+          notify={notify}
+        />
+      )}
+
+      {screen.name === 'dm' && (
+        <DmScreen
+          identity={identity}
+          profile={profile}
+          initialPeerUserId={screen.peerUserId}
+          onBack={goHome}
+          onOpenFriends={() => setScreen({ name: 'friends', inviteUserId: null })}
+          notify={notify}
+        />
+      )}
+
+      {screen.name === 'profile' && (
+        <ProfileScreen
+          identity={identity}
+          profile={profile}
+          persisted={persisted}
+          onBack={goHome}
+          onOpenFriends={() => setScreen({ name: 'friends', inviteUserId: null })}
+          notify={notify}
+        />
+      )}
+
+      {screen.name === 'stats' && <StatsScreen onBack={goHome} notify={notify} />}
+
+      {screen.name === 'settings' && (
+        <SettingsScreen
+          onBack={goHome}
+          onOpenAbout={() => setScreen({ name: 'about' })}
+          notify={notify}
+        />
+      )}
+
+      {screen.name === 'about' && (
+        <AboutScreen onBack={goHome} onOpenSettings={() => setScreen({ name: 'settings' })} />
+      )}
+
+      {screen.name === 'room' && (
         <RoomScreen
           key={`${screen.code}:${screen.role}`}
           code={screen.code}

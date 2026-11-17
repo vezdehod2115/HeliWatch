@@ -1,7 +1,7 @@
 {
   "name": "heliwatch",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "HeliWatch — совместный просмотр видео с голосом и чатом, Android (Tauri v2)",
   "type": "module",
   "license": "MIT",
@@ -25,6 +25,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.5",
+    "@tauri-apps/plugin-dialog": "2.8.4",
+    "@tauri-apps/plugin-fs": "2.7.1",
     "@tauri-apps/plugin-sql": "2.6.0",
     "@trystero-p2p/mqtt": "0.26.0",
     "@trystero-p2p/torrent": "0.26.0",

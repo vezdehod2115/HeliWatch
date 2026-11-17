@@ -66,3 +66,14 @@ export async function saveProfile(row: {
 export async function updateDisplayName(displayName: string): Promise<boolean> {
   return executeSql('UPDATE profile SET display_name = $1 WHERE id = 1', [displayName]);
 }
+
+export async function updateNameColor(nameColor: string): Promise<boolean> {
+  if (!/^#[0-9a-f]{6}$/i.test(nameColor)) {
+    return false;
+  }
+  return executeSql('UPDATE profile SET name_color = $1 WHERE id = 1', [nameColor]);
+}
+
+export async function updateProfileAvatar(avatarHash: string | null): Promise<boolean> {
+  return executeSql('UPDATE profile SET avatar_hash = $1 WHERE id = 1', [avatarHash]);
+}

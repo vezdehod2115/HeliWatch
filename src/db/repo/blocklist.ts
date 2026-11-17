@@ -94,3 +94,30 @@ export async function pruneBlocks(now: number = Date.now()): Promise<boolean> {
     now,
   ]);
 }
+
+/** Все записи, включая истёкшие: нужны для бэкапа (этап 7). */
+export async function listAllBlocks(): Promise<BlockEntry[]> {
+  const rows = await selectRows<BlocklistRow>(
+    `SELECT user_id, reason, created_at, expires_at FROM blocklist ORDER BY created_at DESC`,
+  );
+  return rows.map((row) => ({
+    userId: row.user_id,
+    reason: row.reason ?? '',
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+  }));
+}
+
+/** Импорт бэкапа: локальная запись с тем же userId не затирается. */
+export async function importBlockEntry(entry: BlockEntry): Promise<boolean> {
+  return executeSql(
+    `INSERT INTO blocklist (user_id, reason, created_at, expires_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT(user_id) DO NOTHING`,
+    [entry.userId, entry.reason.slice(0, 200), entry.createdAt, entry.expiresAt],
+  );
+}
+
+export async function clearBlocks(): Promise<boolean> {
+  return executeSql('DELETE FROM blocklist');
+}

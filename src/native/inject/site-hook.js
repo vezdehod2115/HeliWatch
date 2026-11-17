@@ -18,6 +18,11 @@
   var VERSION = 1;
   var REMOTE_GUARD_MS = 800;
   var TIME_UPDATE_MS = 1000;
+  /* Динамический акцент (§2.5): кадр 16×16 раз в ~1.3 с. */
+  var FRAME_SIZE = 16;
+  var FRAME_INTERVAL_MS = 1300;
+  /* Дедбенд для отправки кадра: меньше — только шум, больше — лишние события. */
+  var FRAME_DELTA = 6;
   var VIDEO_EVENTS = [
     'play',
     'playing',
@@ -39,6 +44,13 @@
     applyingUntil: 0,
     lastTimePost: 0,
     pipStyle: false,
+    frameCanvas: null,
+    frameRgb: null,
+    frameTainted: false,
+    frameAt: 0,
+    ageGate: true,
+    ageGateSeen: null,
+    ageGateAt: 0,
   };
 
   function now() {
@@ -133,6 +145,10 @@
       }
       state.lastTimePost = stamp;
     }
+    if (type === 'pause' || type === 'ended') {
+      // Пауза — акцент возвращается к мятному: кадра больше нет.
+      postNoFrame();
+    }
     emitVideo(type);
   }
 
@@ -223,6 +239,177 @@
     }
   }
 
+  // ---------- Динамический акцент (§2.5, этап 7) ----------
+
+  function linearize(channel) {
+    var value = Math.min(255, Math.max(0, channel)) / 255;
+    return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  }
+
+  function encodeLinear(value) {
+    var clamped = Math.min(1, Math.max(0, value));
+    var encoded =
+      clamped <= 0.0031308
+        ? clamped * 12.92
+        : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+    return Math.round(Math.min(1, Math.max(0, encoded)) * 255);
+  }
+
+  /** Средний цвет в линейном пространстве, без почти чёрных и белых пикселей. */
+  function averageFrame(data) {
+    var r = 0;
+    var g = 0;
+    var b = 0;
+    var weight = 0;
+    var pixels = Math.floor(data.length / 4);
+    for (var i = 0; i < pixels; i += 1) {
+      var offset = i * 4;
+      if (data[offset + 3] < 24) {
+        continue;
+      }
+      var lr = linearize(data[offset]);
+      var lg = linearize(data[offset + 1]);
+      var lb = linearize(data[offset + 2]);
+      var luminance = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+      if (luminance < 0.02 || luminance > 0.95) {
+        continue;
+      }
+      r += lr;
+      g += lg;
+      b += lb;
+      weight += 1;
+    }
+    if (weight === 0) {
+      return null;
+    }
+    return {
+      r: encodeLinear(r / weight),
+      g: encodeLinear(g / weight),
+      b: encodeLinear(b / weight),
+    };
+  }
+
+  function frameChanged(next) {
+    var previous = state.frameRgb;
+    if (!next || !previous) {
+      return next !== previous;
+    }
+    return (
+      Math.abs(next.r - previous.r) > FRAME_DELTA ||
+      Math.abs(next.g - previous.g) > FRAME_DELTA ||
+      Math.abs(next.b - previous.b) > FRAME_DELTA
+    );
+  }
+
+  function sampleFrame() {
+    var video = state.video || pickVideo();
+    if (!video || !video.videoWidth || video.paused) {
+      return;
+    }
+    try {
+      if (!state.frameCanvas) {
+        state.frameCanvas = document.createElement('canvas');
+        state.frameCanvas.width = FRAME_SIZE;
+        state.frameCanvas.height = FRAME_SIZE;
+      }
+      var context = state.frameCanvas.getContext('2d', { willReadFrequently: true });
+      if (!context) {
+        return;
+      }
+      context.drawImage(video, 0, 0, FRAME_SIZE, FRAME_SIZE);
+      var frame = context.getImageData(0, 0, FRAME_SIZE, FRAME_SIZE);
+      var rgb = averageFrame(frame.data);
+      state.frameTainted = false;
+      if (!frameChanged(rgb)) {
+        return;
+      }
+      state.frameRgb = rgb;
+      state.frameAt = now();
+      post({
+        t: 'frame',
+        rgb: rgb,
+        w: video.videoWidth || 0,
+        h: video.videoHeight || 0,
+      });
+    } catch (error) {
+      // Чужое видео на canvas: getImageData бросает SecurityError. Сообщаем один
+      // раз — React включит обязательный фоллбэк на мятный.
+      if (!state.frameTainted) {
+        state.frameTainted = true;
+        state.frameRgb = null;
+        post({ t: 'frame', rgb: null, w: 0, h: 0 });
+      }
+    }
+  }
+
+  function postNoFrame() {
+    if (state.frameTainted) {
+      return;
+    }
+    if (state.frameRgb === null) {
+      return;
+    }
+    state.frameRgb = null;
+    post({ t: 'frame', rgb: null, w: 0, h: 0 });
+  }
+
+  // ---------- Age-gate YouTube: best effort (этап 7) ----------
+
+  /**
+   * Не обходим ограничение: только сообщаем React, что сайт просит подтвердить
+   * возраст. Пользователь сам решает — войти в аккаунт в окне сайта или открыть
+   * видео в браузере. Флаг выключается командой setAgeGate из настроек.
+   */
+  function detectAgeGate() {
+    if (!state.ageGate) {
+      return;
+    }
+    var detected = false;
+    var hint = '';
+    try {
+      var selectors =
+        'ytd-consent-bump-v2-lightbox, ytd-player-error-message-renderer, ' +
+        'tp-yt-paper-dialog, [class*="age-gate"], [id*="age-gate"], ' +
+        '[class*="age-verification"], [class*="agecheck"]';
+      var nodes = document.querySelectorAll(selectors);
+      for (var i = 0; i < nodes.length && i < 8; i += 1) {
+        var node = nodes[i];
+        if (!node.getClientRects().length) {
+          continue;
+        }
+        var text = String(node.textContent || '').slice(0, 400);
+        if (/sign in to confirm|подтверд|возраст|age.?gate|18\+/i.test(text)) {
+          detected = true;
+          hint = text.slice(0, 120);
+          break;
+        }
+      }
+      if (!detected && /(^|\.)youtube\.com$/i.test(location.hostname)) {
+        var bodyText = String((document.body && document.body.innerText) || '').slice(0, 4000);
+        if (/sign in to confirm your age|подтвердите свой возраст/i.test(bodyText)) {
+          detected = true;
+          hint = 'YouTube просит подтвердить возраст';
+        }
+      }
+    } catch (error) {
+      return;
+    }
+    var stamp = now();
+    var changed = state.ageGateSeen !== detected;
+    var stale = detected && stamp - state.ageGateAt > 30000;
+    if (!changed && !stale) {
+      return;
+    }
+    state.ageGateSeen = detected;
+    state.ageGateAt = stamp;
+    post({
+      t: 'age-gate',
+      detected: detected,
+      host: location.hostname,
+      hint: hint,
+    });
+  }
+
   function boot() {
     scan();
     try {
@@ -234,7 +421,10 @@
       /* старый WebView — обойдёмся периодическим сканом */
     }
     setInterval(scan, 2500);
+    setInterval(sampleFrame, FRAME_INTERVAL_MS);
+    setInterval(detectAgeGate, 2500);
     reportPage();
+    detectAgeGate();
   }
 
   if (document.readyState === 'loading') {
@@ -266,12 +456,21 @@
         if (!cmd || typeof cmd !== 'object') {
           return false;
         }
+        var name = String(cmd.cmd || '');
+        if (name === 'setAgeGate') {
+          // Настройка «подсказка age-gate» не требует видео на странице.
+          state.ageGate = !!cmd.on;
+          if (!state.ageGate && state.ageGateSeen) {
+            state.ageGateSeen = false;
+            post({ t: 'age-gate', detected: false, host: location.hostname, hint: '' });
+          }
+          return true;
+        }
         var video = state.video || pickVideo();
         if (!video) {
           post({ t: 'note', message: 'На странице не найдено видео' });
           return false;
         }
-        var name = String(cmd.cmd || '');
         state.applyingUntil = now() + REMOTE_GUARD_MS;
         if (name === 'play') {
           var promise = video.play();

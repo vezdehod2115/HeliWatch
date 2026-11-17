@@ -36,6 +36,9 @@ pub fn run() {
                 .build(),
         )
         .plugin(probe("probe-after-sql"))
+        // Этап 7: файловый кэш фото/аватаров и диалоги бэкапа.
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_heliwatch::init())
         .setup(|_app| {
             // Сюда управление доходит только после setup всех плагинов.

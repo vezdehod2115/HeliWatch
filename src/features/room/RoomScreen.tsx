@@ -23,7 +23,7 @@ import { ImageViewer } from '../chat/ImageViewer';
 import { RemoteAudio } from '../voice/RemoteAudio';
 import { imageUrlFromBytes, prepareImage, type PreparedImage } from '../chat/imagePrep';
 import type { SiteController } from '../site/useSiteController';
-import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl } from '../../native/siteBridge';
+import { TEST_PAGE_URL, YOUTUBE_URL, normalizeUrl, sendSiteCommand } from '../../native/siteBridge';
 import type { LocalProfile } from '../../db/repo/identity';
 import { LOBBY_ROOM_ID, roomLink } from '../../net/protocol';
 import {
@@ -48,12 +48,35 @@ import { JoinRequests } from './JoinRequests';
 import type { RoomSetup } from '../lobby/types';
 import { useRoomStore } from '../../stores/room';
 import { useChatStore } from '../../stores/chat';
+import { useSettingsStore } from '../../stores/settings';
+import { useFriendsStore } from '../../stores/friends';
 import { SETTINGS_KEYS, readSetting, writeSetting } from '../../db/repo/settings';
 import { listRoomMessages, saveRoomMessage } from '../../db/repo/chat';
 import { listBlocks, pruneBlocks, blockUser, BAN_SESSION_MS } from '../../db/repo/blocklist';
+import { attachDmImage } from '../../db/repo/dm';
+import { updateFriendAvatar } from '../../db/repo/friends';
+import {
+  mediaImageUrl,
+  readAvatarBytes,
+  saveAvatar,
+  saveMediaImage,
+} from '../../db/repo/media';
 import { sanitizeRecent } from '../chat/emoji';
 import { DuckingController } from '../../media/ducking';
 import { VoiceEngine, describeVoiceError, isVoiceSupported } from '../../media/voice';
+import {
+  pushNoFrame,
+  pushSiteFrame,
+  resetAccent,
+  setAccentPip,
+} from '../../media/accentRuntime';
+import {
+  flushOutboxToPeer,
+  handleDmEvent,
+  rememberIncomingDmImage,
+  type DmContext,
+} from '../../net/dm';
+import { SessionTracker } from '../stats/sessionTracker';
 import { type PlaybackView } from '../../app/playback';
 import { Icon } from '../../app/icons';
 import { PipLayer } from '../pip/PipLayer';
@@ -142,6 +165,7 @@ export function RoomScreen({
 }: RoomScreenProps) {
   const snapshot = useRoomStore();
   const chat = useChatStore();
+  const settings = useSettingsStore();
   const [localView, setLocalView] = useState<PlaybackView>(EMPTY_VIEW);
   const [localFile, setLocalFile] = useState<LocalFile | null>(null);
   const [collapsed, setCollapsed] = useState(false);
@@ -165,6 +189,7 @@ export function RoomScreen({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remotePlaying, setRemotePlaying] = useState(false);
   const [remoteDimensions, setRemoteDimensions] = useState({ width: 0, height: 0 });
+  const [ageGateHidden, setAgeGateHidden] = useState(false);
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
@@ -199,6 +224,15 @@ export function RoomScreen({
   const sessionSignatureRef = useRef('');
   const notificationWarned = useRef(false);
   const notificationCheck = useRef<number | null>(null);
+  /** Статистика сессии (этап 7): играем/микрофон читаются на каждом тике. */
+  const trackerRef = useRef<SessionTracker | null>(null);
+  const endReasonRef = useRef<'left' | 'host-left' | 'timeout' | 'kick' | 'banned' | 'closed' | 'error'>(
+    'left',
+  );
+  const playingRef = useRef(false);
+  const micOnRef = useRef(false);
+  /** Кому уже отправили свой аватар в этой комнате (по userId). */
+  const avatarSentRef = useRef(new Set<string>());
   const pipHandlers = useRef<{
     toggle: () => void;
     mic: () => void;
@@ -262,8 +296,9 @@ export function RoomScreen({
       message: pipMessageLine(last),
       videoWidth: dimensions.width,
       videoHeight: dimensions.height,
+      pipEnabled: settings.pipEnabled,
     };
-  }, [code, voiceActive, voiceMuted, role, remoteDimensions, remotePlaying]);
+  }, [code, voiceActive, voiceMuted, role, remoteDimensions, remotePlaying, settings.pipEnabled]);
 
   useEffect(() => {
     void readSessionInfo().then((info) => {
@@ -322,6 +357,7 @@ export function RoomScreen({
     chat.messages,
     voiceActive,
     voiceMuted,
+    settings.pipEnabled,
   ]);
 
   const applyRemote = useCallback((action: PlaybackAction) => {
@@ -583,7 +619,7 @@ export function RoomScreen({
     const store = useChatStore.getState();
     const next = !store.saveHistory;
     store.setSaveHistory(next);
-    void writeSetting(SETTINGS_KEYS.chatHistory, next).catch(() => undefined);
+    void useSettingsStore.getState().update('chatHistory', next);
     if (next) {
       for (const message of store.messages) {
         if (message.kind === 'text' && message.text) {
@@ -626,6 +662,49 @@ export function RoomScreen({
     setVoiceMuted(muted);
   }, []);
 
+  // ---------- Этап 7: настройки, статистика и личка ----------
+
+  // Ducking и age-gate меняются в настройках — применяем на лету.
+  useEffect(() => {
+    duckingRef.current?.setEnabled(settings.voiceDucking);
+  }, [settings.voiceDucking]);
+
+  useEffect(() => {
+    void sendSiteCommand({ cmd: 'setAgeGate', on: settings.ageGate });
+  }, [settings.ageGate]);
+
+  // Статистика: сессия открывается при входе в комнату (phase = joined).
+  useEffect(() => {
+    if (snapshot.phase !== 'joined' || trackerRef.current) {
+      return;
+    }
+    const peers = snapshot.members
+      .filter((member) => member.userId !== identity.userId)
+      .map((member) => ({ userId: member.userId, name: member.name }));
+    const tracker = new SessionTracker({
+      code,
+      mode: snapshot.mode,
+      isPlaying: () => playingRef.current,
+      isMicOn: () => micOnRef.current,
+    });
+    trackerRef.current = tracker;
+    void tracker.start(snapshot.hostUserId, peers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot.phase, snapshot.mode, snapshot.hostUserId, identity.userId, code]);
+
+  useEffect(() => {
+    const tracker = trackerRef.current;
+    if (!tracker) {
+      return;
+    }
+    void tracker.updatePeers(
+      snapshot.members
+        .filter((member) => member.userId !== identity.userId)
+        .map((member) => ({ userId: member.userId, name: member.name })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot.members, identity.userId]);
+
   // ---------- Жизненный цикл комнаты ----------
 
   useEffect(() => {
@@ -666,36 +745,49 @@ export function RoomScreen({
     const chatStore = useChatStore.getState();
     chatStore.init(code);
 
-    // Настройки (SQLite): история чата, ducking и недавние эмодзи.
+    // Настройки этапа 7 уже загружены Shell: история, ducking и акцент берутся
+    // из store, а из SQLite читаем только недавние эмодзи.
     void (async () => {
-      const [history, ducking, recents] = await Promise.all([
-        readSetting<boolean>(SETTINGS_KEYS.chatHistory, false),
-        readSetting<boolean>(SETTINGS_KEYS.voiceDucking, true),
-        readSetting<unknown>(SETTINGS_KEYS.emojiRecent, []),
-      ]);
+      const recents = await readSetting<unknown>(SETTINGS_KEYS.emojiRecent, []);
       const store = useChatStore.getState();
-      store.setSaveHistory(history === true);
+      store.setSaveHistory(settings.chatHistory);
       store.setRecents(sanitizeRecent(recents));
-      duckingRef.current?.setEnabled(ducking !== false);
-      if (history === true) {
+      duckingRef.current?.setEnabled(settings.voiceDucking);
+      if (settings.chatHistory) {
         const stored = await listRoomMessages(code);
-        const messages: ChatMessage[] = stored
-          .filter((row) => row.kind === 'text')
-          .map((row) => ({
+        const messages: ChatMessage[] = [];
+        for (const row of stored) {
+          const self = row.from === identity.userId;
+          const base = {
             id: row.id,
             from: row.from,
-            name: row.from === identity.userId ? profile.displayName : 'Друг',
-            color: row.from === identity.userId ? profile.nameColor : '#9dbfb7',
+            name: self ? profile.displayName : 'Друг',
+            color: self ? profile.nameColor : '#9dbfb7',
             ts: row.ts,
-            kind: 'text',
-            text: row.body,
-            self: row.from === identity.userId,
-          }));
+            self,
+          };
+          if (row.kind === 'text') {
+            messages.push({ ...base, kind: 'text', text: row.body });
+            continue;
+          }
+          if (!row.imagePath) {
+            continue;
+          }
+          const url = await mediaImageUrl(row.imagePath);
+          if (!url) {
+            continue;
+          }
+          useChatStore.getState().setImage(row.id, url);
+          messages.push({ ...base, kind: 'image', imageId: row.id });
+        }
         if (messages.length > 0) {
           useChatStore.getState().loadMessages(messages);
         }
       }
     })();
+
+    // Age-gate: подсказка включается/выключается настройкой (этап 7).
+    void sendSiteCommand({ cmd: 'setAgeGate', on: settings.ageGate });
 
     // Голос и ducking живут столько же, сколько комната.
     const engine = new VoiceEngine({
@@ -815,6 +907,7 @@ export function RoomScreen({
           }
           break;
         case 'kicked':
+          endReasonRef.current = event.reason === 'banned' ? 'banned' : 'kick';
           store.patch({
             error:
               event.reason === 'banned'
@@ -933,7 +1026,62 @@ export function RoomScreen({
         case 'typing':
           useChatStore.getState().setTyping(event.from, event.name, event.on);
           break;
+        // ---------- Этап 7: друзья и личка прямо в комнате ----------
+        case 'peer-ready': {
+          // Пир авторизован: предлагаем всё, что накопилось в outbox.
+          const client = clientRef.current;
+          if (client) {
+            void flushOutboxToPeer(client, identity.userId, event.userId);
+            // Аватар (этап 7): 128×128 чанками, один раз на пира. Хеш в
+            // profile/профиле друга позволяет не пересылать его повторно.
+            if (profile.avatarHash && !avatarSentRef.current.has(event.userId)) {
+              avatarSentRef.current.add(event.userId);
+              void readAvatarBytes(profile.avatarHash).then((bytes) => {
+                if (!bytes) {
+                  return;
+                }
+                client.sendImage(
+                  { bytes, mime: 'image/jpeg', w: 128, h: 128 },
+                  { scope: 'avatar', to: event.peerId },
+                );
+              });
+            }
+          }
+          break;
+        }
+        case 'friend-request':
+        case 'friend-accepted':
+        case 'friend-removed':
+        case 'dm':
+        case 'dm-ack':
+        case 'dm-outbox':
+        case 'dm-outbox-sync': {
+          const client = clientRef.current;
+          if (!client) {
+            break;
+          }
+          const context: DmContext = {
+            transport: client,
+            selfUserId: identity.userId,
+            identity,
+            profile: {
+              name: profile.displayName,
+              color: profile.nameColor,
+              avatarHash: profile.avatarHash,
+            },
+            notify: (text) => notifyRef.current(text),
+            onChange: () => {
+              void useFriendsStore.getState().refresh();
+            },
+          };
+          void handleDmEvent(event, context);
+          break;
+        }
         case 'image-start': {
+          if (event.info.scope === 'dm' || event.info.scope === 'avatar') {
+            // Фото лички и аватары не попадают в чат комнаты.
+            break;
+          }
           const chatState = useChatStore.getState();
           chatState.setTransfer({
             id: event.info.id,
@@ -954,6 +1102,9 @@ export function RoomScreen({
           break;
         }
         case 'image-progress': {
+          if (event.info.scope === 'dm' || event.info.scope === 'avatar') {
+            break;
+          }
           useChatStore.getState().setTransfer({
             id: event.info.id,
             direction: 'in',
@@ -963,6 +1114,35 @@ export function RoomScreen({
           break;
         }
         case 'image': {
+          if (event.scope === 'avatar') {
+            // Аватар друга: кладём в кэш и обновляем только существующую
+            // запись друга — из чужого аватара дружба не появляется.
+            if (event.bytes.byteLength > 256 * 1024 || !event.from) {
+              break;
+            }
+            void saveAvatar(event.bytes, event.mime).then(async (hash) => {
+              if (!hash) {
+                return;
+              }
+              await updateFriendAvatar(event.from, hash);
+              await useFriendsStore.getState().refresh();
+            });
+            break;
+          }
+          if (event.scope === 'dm') {
+            // Личное фото: кладём в файловый кэш и привязываем к dm-сообщению.
+            void saveMediaImage(event.bytes, event.mime, event.w, event.h).then(
+              async (saved) => {
+                if (!saved) {
+                  return;
+                }
+                rememberIncomingDmImage(event.id, saved.path);
+                await attachDmImage(event.id, saved.path);
+                await useFriendsStore.getState().refresh();
+              },
+            );
+            break;
+          }
           const chatState = useChatStore.getState();
           const url = imageUrlFromBytes(event.bytes, event.mime);
           chatState.setImage(event.id, url);
@@ -977,7 +1157,7 @@ export function RoomScreen({
             pending: false,
             failed: false,
           });
-          chatState.addMessage({
+          const imageMessage: ChatMessage = {
             id: event.id,
             from: event.from,
             name: event.name,
@@ -986,10 +1166,24 @@ export function RoomScreen({
             kind: 'image',
             imageId: event.id,
             pending: false,
-          });
+          };
+          chatState.addMessage(imageMessage);
+          // Файловый кэш этапа 7: фото переживает перезапуск в истории.
+          void saveMediaImage(event.bytes, event.mime, event.w, event.h).then(
+            (saved) => {
+              if (saved && useChatStore.getState().saveHistory) {
+                void saveRoomMessage(code, imageMessage, saved.path).catch(
+                  () => undefined,
+                );
+              }
+            },
+          );
           break;
         }
         case 'image-error': {
+          if (event.scope === 'dm' || event.scope === 'avatar') {
+            break;
+          }
           const chatState = useChatStore.getState();
           chatState.clearTransfer(event.id);
           chatState.updateMessage(event.id, { pending: false, failed: true });
@@ -1035,10 +1229,15 @@ export function RoomScreen({
           }
           break;
         case 'error':
+          endReasonRef.current = 'error';
           store.patch({ error: event.message });
           notifyRef.current(event.message);
           break;
         case 'closed':
+          endReasonRef.current =
+            typeof event.reason === 'string' && event.reason === 'host-left'
+              ? 'host-left'
+              : 'closed';
           store.patch({ phase: 'closed' });
           if (closeTimer.current !== null) {
             window.clearTimeout(closeTimer.current);
@@ -1136,6 +1335,11 @@ export function RoomScreen({
       siteRef.current.setVolume(1);
       // Комната закрыта: сервис, WakeLock и автовход в PiP выключаются.
       void stopSession();
+      // Статистика: закрываем сессию причиной, которую запомнили обработчики.
+      const tracker = trackerRef.current;
+      trackerRef.current = null;
+      void tracker?.stop(endReasonRef.current);
+      resetAccent();
       useChatStore.getState().reset();
       setRemoteStreams({});
     };
@@ -1147,9 +1351,18 @@ export function RoomScreen({
   useEffect(
     () =>
       site.onEvent((event) => {
+        // Динамический акцент (§2.5): кадр из site-hook. Не требует авторизации
+        // комнаты — цвет можно считать сразу, но вне комнаты он не применяется.
+        if (event.t === 'page' && event.event === 'frame') {
+          if (modeRef.current === 'site') {
+            pushSiteFrame(event.data);
+          }
+          return;
+        }
         if (event.t === 'pip-mode') {
           const on = event.on === true;
           setPipActive(on);
+          setAccentPip(on);
           if (on) {
             // В PiP панели не нужны: остаётся видео и строка сообщения.
             const chatState = useChatStore.getState();
@@ -1654,6 +1867,21 @@ export function RoomScreen({
     void setKeepScreenOn(snapshot.phase === 'joined' && view.playing);
   }, [snapshot.phase, view.playing]);
 
+  // Акцент: пауза — это отсутствие кадра, поэтому сразу мятный. Здесь же
+  // держим актуальные «играем/микрофон» для тика статистики.
+  useEffect(() => {
+    playingRef.current = view.playing;
+    micOnRef.current = voiceActive && !voiceMuted;
+    if (!view.playing) {
+      pushNoFrame();
+    }
+  }, [view.playing, voiceActive, voiceMuted]);
+
+  // Новая подсказка age-gate снова показывается, даже если прошлую скрыли.
+  useEffect(() => {
+    setAgeGateHidden(false);
+  }, [site.status.ageGate?.at]);
+
   const applyAndReport = (action: PlaybackAction) => {
     if (!found || streamViewer) {
       return;
@@ -1806,7 +2034,7 @@ export function RoomScreen({
           onToggleZones={onToggleZones}
           onOpenMembers={() => setModerationOpen((value) => !value)}
           onPip={enterPipMode}
-          pipAvailable={pipSupported}
+          pipAvailable={pipSupported && settings.pipEnabled}
         />
       )}
 
@@ -1942,6 +2170,27 @@ export function RoomScreen({
         />
       )}
 
+      {!pipActive && settings.ageGate && site.status.ageGate?.detected && !ageGateHidden && (
+        <div className="hw-agegate" data-hw-region="agegate">
+          <Icon name="lock" size={18} />
+          <div className="hw-agegate-text">
+            <strong>Сайт просит подтвердить возраст</strong>
+            <p>
+              HeliWatch не обходит возрастные ограничения. Войдите в аккаунт в окне
+              сайта или откройте это видео в браузере.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="hw-iconbtn hw-iconbtn--small"
+            onClick={() => setAgeGateHidden(true)}
+            aria-label="Скрыть подсказку"
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+
       {!pipActive && (
         <ChatDock
           lastMessage={lastMessage}
@@ -2022,7 +2271,7 @@ export function RoomScreen({
         />
       )}
 
-      <RemoteAudio streams={remoteStreams} />
+      <RemoteAudio streams={remoteStreams} volume={settings.voiceVolume} />
 
       {(snapshot.phase === 'closed' || snapshot.phase === 'error') && (
         <div className="hw-roommsg" data-hw-region="roommsg">

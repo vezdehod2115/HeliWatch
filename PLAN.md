@@ -30,7 +30,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 | 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ✅ завершён | 17.11.2026 | 0.4.0: PiP с тремя RemoteAction, автовход на Android 12+ и `onUserLeaveHint` на 8–11; foreground-сервис mediaPlayback → microphone; TimerGuard (`onResume` + `resumeTimers` после `super`); `FLAG_KEEP_SCREEN_ON`; строка сообщения и тикающее время в PiP |
 | 5 | Стрим файла с телефона хоста | 0.5.0 | ✅ завершён | 17.11.2026 | 0.5.0: режим B — `captureStream()` + canvas/WebAudio фоллбэк, `stream-start/stop/capability`, до 2 зрителей, .mkv с предупреждением, хост-драйвер и закрытие комнаты при его уходе |
 | 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ✅ завершён | 17.11.2026 | 0.6.0: лобби `heliwatch-lobby-v1` с подписанными карточками (TTL 70 с, announce 25 ± 5 с, антиспам 1/5 с, probe), пароль как ключ сигналинга (`signalingRoomId` + `pwHash` в join), «стук» с join-accept/deny, kick/ban/mute-request, передача хоста и миграция в A/C (режим B закрывается), лимиты 2–6, бан-лист в SQLite (миграция v3) |
-| 7 | Друзья, DM, статистика, бэкап, динамический акцент, age-gate | 0.7.0 | ⬜ не начат | — | — |
+| 7 | Друзья, DM, статистика, бэкап, динамический акцент, age-gate | 0.7.0 | ✅ завершён | 17.11.2026 | 0.7.0: друзья по ссылке-приглашению (`invite-<hash>`), взаимное подтверждение и outbox-доставка при встрече, парная комната `dm-<hash(пары)>` (по умолчанию выключена), отдельные DM (`dm_messages`) с фото и LRU-кэшем 200 МБ, сессии/heartbeat 30 с и `peer_stats`, бэкап JSON с checksum и режимами «слить/заменить», OKLCH-акцент из кадра с фоллбэком на мятный, age-gate как подсказка без обхода |
 
 ## 1. Версии и стек (зафиксировано)
 
@@ -111,6 +111,8 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 Kotlin форвардит как `site-event` → `accentService`: OKLCH-коррекция (L ∈ 0.62–0.86, C ≥ 0.06, оттенок сохраняется, при C < 0.05 — мятный), проверка контраста к фону ≥ 4.5:1, сглаживание EMA, дедбенд ΔE < 4, не чаще 1.5 с → `--accent` на `:root`, transition 700 мс; `--accent-soft` через `color-mix`. Фоллбэк на `#6ff0c4`: нет кадра, пауза, ошибка, tainted, вне комнаты/просмотра, режим выключен в настройках (по умолчанию включён). Для режимов B и C цвет считается прямо в React из локального `<video>` (blob/asset — canvas не tainted). В PiP самплинг продолжается с интервалом 2 с.
 
 Акцент применяется через переменные: кнопки и иконки, ползунки и прогресс, индикатор речи, свои сообщения в чате, подсветка реакций, фокус-ринги, активный пункт навигации. Тема меняется в одном месте — `src/styles/theme.css` (`@theme`: фон `#06201d`, текст, вторичный текст, радиусы 16–24, длительности 150–250 мс, прозрачность панелей).
+>
+> **Реализовано в 0.7.0:** `src/media/accent.ts` — линейное усреднение кадра 16×16, OKLCH-коррекция L 0.62–0.86 и C ≥ 0.06, проверка контраста ≥ 4.5:1, EMA, дедбенд ΔE < 4, троттлинг 1.5 с (2 с в PiP); `site-hook.js` шлёт `{t:'frame', rgb|null}` и на паузе/tainted canvas даёт фоллбэк; для режимов B/C кадр снимается из локального `<video>`; `--hw-accent`/`--hw-accent-rgb` на `:root` с переходом 700 мс.
 
 ### 2.6 Риски решения и смягчение
 
@@ -142,13 +144,13 @@ HeliWatch/
 ├─ scripts/  apply-android-patches.mjs, icons.mjs, version.mjs, check-android.mjs
 ├─ src/
 │  ├─ main.tsx  App.tsx  styles/{theme.css, globals.css}
-│  ├─ app/{router.tsx, Shell.tsx}
+│  ├─ app/{router.tsx, Shell.tsx, PageHeader.tsx, time.ts}
 │  ├─ features/{lobby,room,site,videofile,localplay,chat,voice,dm,friends,profile,stats,settings,pip,about}
-│  ├─ net/{trystero.ts,peerjs.ts,protocol.ts,room.ts,identity.ts,blobs.ts,lobby.ts,outbox.ts,negotiation.ts}
-│  ├─ media/{voice.ts,stream.ts,capture.ts,ducking.ts,accent.ts,flags.ts}
+│  ├─ net/{trystero.ts,peerjs.ts,protocol.ts,room.ts,identity.ts,blobs.ts,lobby.ts,outbox.ts,negotiation.ts,ice.ts,pair.ts,dm.ts,dmChannels.ts}
+│  ├─ media/{voice.ts,stream.ts,capture.ts,ducking.ts,accent.ts,accentRuntime.ts,flags.ts}
 │  ├─ native/{siteBridge.ts,nativeBridge.ts,pip.ts,service.ts,permissions.ts,inject/site-hook.js}
-│  ├─ db/{index.ts,migrations.ts,repo/{profile,friends,dm,outbox,stats,avatars,settings,rooms,chat}.ts,backup.ts}
-│  └─ stores/{profile,room,chat,ui,settings,stats}.ts
+│  ├─ db/{index.ts,migrations.ts,repo/{profile,friends,dm,outbox,stats,media,avatars,settings,rooms,chat}.ts,backup.ts,backupFormat.ts}
+│  └─ stores/{profile,room,chat,ui,settings,stats,friends,dm}.ts
 └─ src-tauri/
    ├─ Cargo.toml  tauri.conf.json  build.rs  src/{main.rs,lib.rs,db.rs}
    ├─ plugins/heliwatch/            # локальный Android-плагин, код вне gen/
@@ -253,7 +255,7 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 
 ### 4.7 Чанкинг, backpressure, фото и аватары
 
-Чанк 16 КиБ (`ArrayBuffer`, `hw-blob`), изображение ≤ 2 МБ после клиентского сжатия (canvas, длинная сторона 1280, JPEG 0.8). Отправитель: `image-start{size,chunks,sha256}` → цикл с `bufferedAmount`: высокий порог 1 МиБ, низкий 256 КиБ, ожидание `bufferedamountlow` (таймаут 10 с → `image-cancel`), прогресс в UI, кнопка «Отмена». Получатель: сборка по порядку, таймаут 30 с, проверка размера и SHA-256, при mismatch — один `image-nack` (повтор), затем `cancel`. Фото в 0.3.0 живут в памяти сессии: файлового кэша `plugin-fs` ещё нет, он появится вместе с LRU 200 МБ на этапе 7. Backpressure в 0.3.0 — последовательная отправка с паузой 8 мс: trystero не отдаёт `bufferedAmount`, а залп на 2 МБ рвёт канал. На этапе 7 фото переедут в кэш `plugin-fs` (LRU 200 МБ); миниатюры 256 px в canvas, в чате превью, тап — полноэкранный просмотр со свайпом. Аватары: та же схема, ≤128×128, лимит 50 файлов / 5 МБ, обмен по `avatarHash` (не шлём повторно). Лимит текста 4000 символов.
+Чанк 16 КиБ (`ArrayBuffer`, `hw-blob`), изображение ≤ 2 МБ после клиентского сжатия (canvas, длинная сторона 1280, JPEG 0.8). Отправитель: `image-start{size,chunks,sha256}` → цикл с `bufferedAmount`: высокий порог 1 МиБ, низкий 256 КиБ, ожидание `bufferedamountlow` (таймаут 10 с → `image-cancel`), прогресс в UI, кнопка «Отмена». Получатель: сборка по порядку, таймаут 30 с, проверка размера и SHA-256, при mismatch — один `image-nack` (повтор), затем `cancel`. Фото в 0.3.0 живут в памяти сессии: файлового кэша `plugin-fs` ещё нет, он появится вместе с LRU 200 МБ на этапе 7. Backpressure в 0.3.0 — последовательная отправка с паузой 8 мс: trystero не отдаёт `bufferedAmount`, а залп на 2 МБ рвёт канал. - **Реализовано в 0.7.0:** фото чата и DM живут в файловом кэше `plugin-fs` (LRU 200 МБ, `media_cache`), аватары — 128×128 в app-data (LRU 50 файлов / 5 МБ, `avatars`). Превью в чате, тап — полноэкранный просмотр со свайпом. Свой аватар уходит друзьям при `peer-ready` в комнате чанками `hw-blob` со `scope: avatar`; полученный хеш обновляет только существующую запись друга. Лимит текста 4000 символов.
 
 ### 4.8 Сигналинг, ICE/TURN, лобби
 
@@ -262,7 +264,7 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 - Лобби: `heliwatch-lobby-v1`; хост держит одну карточку, `announce` каждые 25 с (±5 с джиттера), `update` при изменении состава/режима, `remove` при закрытии/заполнении. Остальные держат карту карточек с TTL 70 с, отбрасывают устаревшие, спам-rate-limit 1 публикация / 5 с на хост, локальный блок-лист. Новичок на `onPeerJoin` шлёт `lobby-probe` (хосты отвечают своей карточкой, не чаще 1/с).
 - Жизненный цикл: вход в рабочую комнату → **сразу** `lobby.leave()` и остановка таймеров; хост при заполнении/закрытии снимает карточку и выходит из лобби; при освобождении места — снова заходит и публикует. Лобби и рабочая комната одновременно не открыты (rate limit релеев, батарея).
 - Переподключение к лобби/комнате: exponential backoff 2 → 4 → 8 → … → 60 с с джиттером, один реконнект за раз, статус в UI.
-- Парная комната друзей (опционально, **по умолчанию выключено**): пока приложение на экране, друг может открыть комнату на двоих с фиксированным id `dm:<hash(пары)>`, и DM доставляется сразу; при сворачивании/уходе в фон комната закрывается, батарея не тратится. Включают обе стороны явно, в настройках есть пояснение про расход.
+- Парная комната друзей (опционально, **по умолчанию выключено**): пока приложение на экране, друг может открыть комнату на двоих с фиксированным id `dm:<hash(пары)>`, и DM доставляется сразу; при сворачивании/уходе в фон комната закрывается, батарея не тратится. Включают обе стороны явно, в настройках есть пояснение про расход. **Реализовано в 0.7.0:** `src/net/pair.ts` + `dmChannels.ts`, комната `dm-<hash(пары)>`; ссылка-приглашение использует комнату `invite-<hash(userId)>`; фон закрывает обе через событие `app-state` из Kotlin.
 
 ## 5. Локальная БД (SQLite, `plugin-sql`) и бэкап
 
@@ -274,10 +276,11 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 | `blocklist` | `user_id` | `reason`, `created_at`, `expires_at` (сессия/навсегда) |
 | `dm_messages` | `id` | `peer_user_id`, `dir`, `kind(text\|image)`, `body`, `image_path`, `ts`, `status(sent\|delivered)`, `sig`; индекс `(peer_user_id, ts)` |
 | `outbox` | `id` | `to_user_id`, `payload_json`, `sig`, `created_at`, `attempts`, `next_attempt_at`, `status` |
-| `sessions` | `id` | `room_code`, `mode`, `started_at`, `ended_at`, `end_reason(left\|timeout\|kick\|crash)`, `peers_json`, `host_user_id`; heartbeat 30 с |
+| `sessions` | `id` | `room_code`, `mode`, `started_at`, `ended_at`, `end_reason(left\|timeout\|kick)` (в 0.7.0 также `host-left\|banned\|closed\|error`), `peers_json`, `host_user_id`, `last_heartbeat`; heartbeat 30 с |
 | `peer_stats` | `(peer_user_id, day)` | `sessions`, `seconds_total`, `seconds_voice`, `seconds_watch`, `modes_json`, `last_meet_at` |
 | `room_chat` | `id` | `room_code`, `ts`, `from_user_id`, `kind`, `body`, `image_path`, `saved` (история — только по желанию) |
 | `avatars` | `hash` | `path`, `size`, `last_used_at` (LRU 50 / 5 МБ) |
+| `media_cache` | `hash` | `path`, `size`, `mime`, `w`, `h`, `last_used_at` (LRU 200 МБ, этап 7: фото чата и DM) |
 | `settings` | `key` | `value_json`: динамический акцент, прозрачность чата, громкость голоса, ducking, TURN, PiP |
 | `recent_rooms` | `code` | `last_join_at` |
 

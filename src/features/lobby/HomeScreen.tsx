@@ -29,6 +29,15 @@ interface HomeScreenProps {
   onRename: (name: string) => Promise<boolean>;
   onCodeConsumed?: () => void;
   notify: (text: string) => void;
+  /** Разделы этапа 7: друзья, личка, статистика, настройки, профиль. */
+  onOpenFriends: () => void;
+  onOpenDm: () => void;
+  onOpenStats: () => void;
+  onOpenSettings: () => void;
+  onOpenProfile: () => void;
+  friendsCount: number;
+  pendingFriends: number;
+  unreadDm: number;
 }
 
 function relativeTime(timestamp: number): string {
@@ -58,6 +67,14 @@ export function HomeScreen({
   onRename,
   onCodeConsumed,
   notify,
+  onOpenFriends,
+  onOpenDm,
+  onOpenStats,
+  onOpenSettings,
+  onOpenProfile,
+  friendsCount,
+  pendingFriends,
+  unreadDm,
 }: HomeScreenProps) {
   const lobby = useLobby();
   const [name, setName] = useState(profile.displayName);
@@ -160,6 +177,48 @@ export function HomeScreen({
           </div>
           <span className="hw-brand-version">{__APP_VERSION__}</span>
         </header>
+
+        <nav className="hw-navgrid" aria-label="Разделы">
+          <button type="button" className="hw-navbtn" onClick={onOpenFriends}>
+            <Icon name="users" size={20} />
+            <span>
+              <strong>Друзья</strong>
+              <small>
+                {friendsCount > 0 ? `${friendsCount} в друзьях` : 'пригласить по ссылке'}
+              </small>
+            </span>
+            {pendingFriends > 0 ? <span className="hw-unread">{pendingFriends}</span> : null}
+          </button>
+          <button type="button" className="hw-navbtn" onClick={onOpenDm}>
+            <Icon name="chat" size={20} />
+            <span>
+              <strong>Личные</strong>
+              <small>{unreadDm > 0 ? `${unreadDm} новых` : 'отдельно от комнаты'}</small>
+            </span>
+            {unreadDm > 0 ? <span className="hw-unread">{unreadDm}</span> : null}
+          </button>
+          <button type="button" className="hw-navbtn" onClick={onOpenStats}>
+            <Icon name="history" size={20} />
+            <span>
+              <strong>Статистика</strong>
+              <small>время вместе</small>
+            </span>
+          </button>
+          <button type="button" className="hw-navbtn" onClick={onOpenSettings}>
+            <Icon name="settings" size={20} />
+            <span>
+              <strong>Настройки</strong>
+              <small>акцент, TURN, бэкап</small>
+            </span>
+          </button>
+          <button type="button" className="hw-navbtn" onClick={onOpenProfile}>
+            <Icon name="users" size={20} />
+            <span>
+              <strong>Профиль</strong>
+              <small>{profile.displayName}</small>
+            </span>
+          </button>
+        </nav>
 
         <section className="hw-card">
           <div className="hw-card-head">
