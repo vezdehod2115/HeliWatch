@@ -6,13 +6,17 @@ import {
   createNonce,
   createUlid,
   generateRoomCode,
+  isCapabilityData,
   isEnvelope,
   isNonceFresh,
   isStateRefresh,
+  isStreamStartData,
+  isStreamStopData,
   isValidState,
   normalizeRoomCode,
   parseRoomInput,
   projectState,
+  roomLimitForMode,
   roomLink,
   shouldApplyState,
   signingInput,
@@ -155,5 +159,47 @@ describe('воспроизведение', () => {
     expect(actionFromVideoEvent('ended', { duration: 99 })).toEqual({ kind: 'pause', t: 99 });
     expect(actionFromVideoEvent('timeupdate', { time: 5 })).toBeNull();
     expect(actionFromVideoEvent('remote-play', {})).toBeNull();
+  });
+});
+
+describe('стрим файла хоста (этап 5)', () => {
+  it('лимит комнаты в режиме stream — 3 участника', () => {
+    expect(roomLimitForMode('stream')).toBe(3);
+    expect(roomLimitForMode('site')).toBe(4);
+    expect(roomLimitForMode('local')).toBe(4);
+  });
+
+  it('stream-start принимает только 1–2 зрителя и известный способ захвата', () => {
+    expect(
+      isStreamStartData({ maxViewers: 2, capture: 'direct', fileName: 'a.mp4', duration: 90 }),
+    ).toBe(true);
+    expect(isStreamStartData({ maxViewers: 0, capture: 'direct' })).toBe(false);
+    expect(isStreamStartData({ maxViewers: 3, capture: 'direct' })).toBe(false);
+    expect(isStreamStartData({ maxViewers: 2, capture: 'unknown' })).toBe(false);
+    expect(isStreamStartData({ maxViewers: 2, capture: 'canvas', duration: -1 })).toBe(false);
+  });
+
+  it('stream-stop и capability валидируются', () => {
+    expect(isStreamStopData({ reason: 'host-stop' })).toBe(true);
+    expect(isStreamStopData({ reason: 'что-то' })).toBe(false);
+    expect(isCapabilityData({ canCapture: true, maxViewers: 2, capture: 'canvas' })).toBe(true);
+    expect(isCapabilityData({ canCapture: false, maxViewers: 0 })).toBe(true);
+    expect(isCapabilityData({ canCapture: 'yes', maxViewers: 2 })).toBe(false);
+  });
+
+  it('state с источником stream проходит валидацию', () => {
+    expect(
+      isValidState(
+        {
+          playing: true,
+          t: 10,
+          rate: 1,
+          src: { mode: 'stream', fileName: 'host.mp4', duration: 100 },
+          seq: 3,
+          by: 'user-host',
+        },
+        'user-host',
+      ),
+    ).toBe(true);
   });
 });

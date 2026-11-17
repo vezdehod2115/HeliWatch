@@ -15,7 +15,9 @@ export interface Channel {
   /** Бинарный action `hw-blob`: кадр чанка фото (см. net/blobs.ts). */
   onBlobMessage: ((data: unknown, peerId: string) => void) | null;
   /** Входящий голосовой поток пира (trystero onPeerStream). */
-  onPeerStream: ((stream: MediaStream, peerId: string) => void) | null;
+  onPeerStream:
+    | ((stream: MediaStream, peerId: string, metadata?: unknown) => void)
+    | null;
   send: (data: unknown, to?: string) => void;
   sendBlob: (data: ArrayBuffer, to?: string) => void;
   knownPeers: () => string[];
@@ -31,5 +33,13 @@ export interface Channel {
    * без renegotiation и без повторного `getUserMedia`.
    */
   setMicMuted?: (track: MediaStreamTrack, muted: boolean) => void;
+  /**
+   * Стрим файла хоста (этап 5): видео+звук одним MediaStream с метаданными
+   * `{kind:'screen'}`. Без `peerId` — всем, с ним — конкретному зрителю после
+   * его авторизации (поздний пир не получает поток до welcome).
+   */
+  addScreenStream?: (stream: MediaStream, peerId?: string) => void;
+  /** Остановить раздачу: removeStream и сброс кеша для поздних пиров. */
+  removeScreenStream?: (stream: MediaStream) => void;
   leave: () => void;
 }

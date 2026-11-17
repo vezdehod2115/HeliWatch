@@ -28,7 +28,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 | 2 | P2P-комнаты, identity, синхронизация сайта и локальных файлов | 0.2.3 | ✅ завершён | 17.11.2026 | 0.2.1: 16-КБ `.so`; 0.2.3: контейнер не добавляет Tauri-WebView в конструкторе (JNI abort); nonce-аутентификация, режимы A/C, автокоррекция |
 | 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ✅ завершён | 17.11.2026 | 0.3.0: голос с replaceTrack без renegotiation, индикатор речи и ducking, чат с typing и историей по желанию, фото чанками 16 КиБ по `hw-blob`, эмодзи и 8 быстрых реакций |
 | 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ✅ завершён | 17.11.2026 | 0.4.0: PiP с тремя RemoteAction, автовход на Android 12+ и `onUserLeaveHint` на 8–11; foreground-сервис mediaPlayback → microphone; TimerGuard (`onResume` + `resumeTimers` после `super`); `FLAG_KEEP_SCREEN_ON`; строка сообщения и тикающее время в PiP |
-| 5 | Стрим файла с телефона хоста | 0.5.0 | ⬜ не начат | — | — |
+| 5 | Стрим файла с телефона хоста | 0.5.0 | ✅ завершён | 17.11.2026 | 0.5.0: режим B — `captureStream()` + canvas/WebAudio фоллбэк, `stream-start/stop/capability`, до 2 зрителей, .mkv с предупреждением, хост-драйвер и закрытие комнаты при его уходе |
 | 6 | Открытые/закрытые комнаты, лобби, модерация | 0.6.0 | ⬜ не начат | — | — |
 | 7 | Друзья, DM, статистика, бэкап, динамический акцент, age-gate | 0.7.0 | ⬜ не начат | — | — |
 
@@ -180,11 +180,13 @@ HeliWatch/
 
 Экран и CPU: `FLAG_KEEP_SCREEN_ON` на окне, пока комната активна и идёт воспроизведение (команда из JS); partial `WakeLock` — только в сервисе на время активной комнаты, с таймаутом и обязательным `release()` (разрешение WAKE_LOCK объявлено в манифесте плагина).
 
+**Стрим файла хоста (этап 5) — целиком в React-слое, без нового Kotlin.** `src/media/capture.ts` забирает кадры из `<video>`: сначала `HTMLMediaElement.captureStream()`, при отсутствии — canvas 30 fps + `AudioContext.createMediaElementSource` (звук хоста слышен локально и уходит в MediaStream). `src/media/stream.ts` держит один захват на комнату, переиспользует аудиограф при смене файла и разблокирует `AudioContext` по жесту play. `RoomClient` отдаёт поток через trystero `addStream` с metadata `{kind:'screen'}`, а зритель рисует его в `src/features/videofile/RemoteStreamPlayer.tsx`; нативная часть получает только новый `mode:"stream"` в снимке комнаты для PiP/уведомления.
+
 ## 4. Протокол WebRTC
 
 ### 4.1 Транспорт и роли
 
-Комната = trystero-комната (`appId: heliwatch-v1`, `roomId` = короткий код, лобби = `heliwatch-lobby-v1`). Один JSON-action `hw` (поле `t` — тип), один бинарный action `hw-blob` для чанков. Конверт: `{v:1, t, id, ts, from, to?, rid, d, sig?}` — `id` ULID, `ts` монотонные мс, `from` = userId. Режимы: **A** — сайт/стриминг в site-WebView, **B** — стрим файла с телефона хоста, **C** — у каждого свой локальный файл (синхронизируется только таймкод). Вход: код из 6 символов (Crockford base32, без похожих букв) или ссылка `heliwatch://r/<code>` (intent-filter в манифесте, без сервера). Роли: **хост** (создатель, авторитет по составу/лимитам/карточке лобби) и **участник**; `driver` — тот, чьё состояние воспроизведения считается истиной (режим A/C — любой, режим B — хост). Mesh до `limit` (по умолчанию 4, максимум 6).
+Комната = trystero-комната (`appId: heliwatch-v1`, `roomId` = короткий код, лобби = `heliwatch-lobby-v1`). Один JSON-action `hw` (поле `t` — тип), один бинарный action `hw-blob` для чанков. Конверт: `{v:1, t, id, ts, from, to?, rid, d, sig?}` — `id` ULID, `ts` монотонные мс, `from` = userId. Режимы: **A** — сайт/стриминг в site-WebView, **B** — стрим файла с телефона хоста, **C** — у каждого свой локальный файл (синхронизируется только таймкод). Вход: код из 6 символов (Crockford base32, без похожих букв) или ссылка `heliwatch://r/<code>` (intent-filter в манифесте, без сервера). Роли: **хост** (создатель, авторитет по составу/лимитам/карточке лобби) и **участник**; `driver` — тот, чьё состояние воспроизведения считается истиной (режим A/C — любой, режим B — хост). Mesh до `limit` (по умолчанию 4, максимум 6). В режиме B лимит жёстко 3 (хост + 2 зрителя): канал мобильного хоста не тянет больше, третий зритель получает `join-deny: room-full`.
 
 ### 4.2 Порядок установки соединения
 
@@ -217,7 +219,7 @@ HeliWatch/
 | `status` | `watching\|buffering\|paused\|away`, `t?` | всем, 10 с | — |
 | `typing` | `on` | всем | — |
 | `image-start` / `image-chunk` / `image-end` / `image-cancel` | `id`, `mime`, `size`, `w`, `h`, `chunks`, `scope`, `to?` | 1→1 или всем | — |
-| `stream-start` / `stream-stop` / `capability` | `videoHash?`, `maxViewers` | хост→всем | — |
+| `stream-start` / `stream-stop` / `capability` | `fileName?`, `duration?`, `videoHash?`, `maxViewers`, `capture:direct\|canvas` / `reason?` / `canCapture`, `maxViewers`, `capture?` | хост→всем | — |
 | `lobby-probe` | — | новичок в лобби | — |
 | `lobby-announce` / `lobby-update` / `lobby-remove` | `card{code,title,mode,closed,limit,count,hasPassword,hostUserId,updatedAt}` | всем в лобби | ✔ |
 | `kick` / `ban` | `target`, `reason`, `until?` | хост→target + всем | ✔ |
@@ -247,7 +249,7 @@ WebCrypto ECDSA P-256, ключ создаётся при первом запу�
 
 ### 4.6 Пересогласование треков (после входа в комнату)
 
-На `onPeerJoin` создаём у каждого пира по transceiver'у audio `sendrecv` и video (роль зависит от режима) через `room.getPeers()[peerId]`. Микрофон: `sender.replaceTrack(micTrack)` при включении, `replaceTrack(null)` при выключении — **без renegotiation**, у собеседника просто тишина; факт выключения передаём `status`. Стрим файла (B): хост делает `replaceTrack(videoTrack)` на своём video-sender'е, зрители уже имеют `recvonly`-трансивер; стоп — `replaceTrack(null)` + `stream-stop`. `onnegotiationneeded` остаётся страховкой: perfect negotiation (impolite = хост, polite = гость, rollback при коллизии) на случай peerjs-фоллбэка и поздно подключившегося пира; тоггл микрофона renegotiation не запускает.
+Аудио-трансивер появляется при первом включении микрофона (`room.addStream` — одна renegotiation на соединение). Микрофон: `sender.replaceTrack(micTrack)` при включении, `replaceTrack(null)` при выключении — **без renegotiation**, у собеседника просто тишина; факт выключения передаём `status`. Стрим файла (B) в 0.5.0: хост захватывает `<video>` через `captureStream()` (фоллбэк — canvas 30 fps + WebAudio) и отдаёт один MediaStream (video+audio) через `room.addStream(..., {metadata:{kind:'screen'}})`; зритель получает `onPeerStream` с тем же metadata и рисует отдельным `<video>`, не смешивая его с голосом. Поздний зритель получает поток адресно после `welcome`; стоп — `removeStream` + `stream-stop`. `onnegotiationneeded` внутри trystero закрывает пересогласование; perfect negotiation остаётся страховкой для peerjs-фоллбэка, тоггл микрофона renegotiation не запускает.
 
 ### 4.7 Чанкинг, backpressure, фото и аватары
 

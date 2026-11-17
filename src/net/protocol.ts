@@ -13,10 +13,28 @@ export const ROOM_CODE_LENGTH = 6;
 export const ROOM_LIMIT_DEFAULT = 4;
 export const ROOM_LIMIT_MAX = 6;
 
+/** Стрим файла хоста (§4.1, этап 5): 1–2 зрителя, всего до 3 участников. */
+export const STREAM_MAX_VIEWERS = 2;
+export const STREAM_ROOM_LIMIT = STREAM_MAX_VIEWERS + 1;
+/** Имя файла в state/stream-start: только для интерфейса, не для доступа. */
+export const STREAM_FILE_NAME_MAX = 200;
+/** Канвас-фоллбэк рисует не шире 1280 px по длинной стороне. */
+export const STREAM_CAPTURE_MAX_SIDE = 1280;
+export const STREAM_CAPTURE_FPS = 30;
+
+/** Лимит комнаты зависит от режима: в B больше двух зрителей не подключаем. */
+export function roomLimitForMode(mode: RoomMode): number {
+  return mode === 'stream' ? STREAM_ROOM_LIMIT : ROOM_LIMIT_DEFAULT;
+}
+
 /** Nonce живёт 60 секунд и гасится после использования (§4.4 плана). */
 export const NONCE_TTL_MS = 60_000;
 
-export type RoomMode = 'site' | 'local';
+/**
+ * Режимы §4.1: `site` — A (сайт/стриминг), `stream` — B (файл хоста раздаётся
+ * зрителям), `local` — C (у каждого свой файл, синхронизируется время).
+ */
+export type RoomMode = 'site' | 'local' | 'stream';
 export type RoomRole = 'host' | 'guest';
 
 /** Допустимые множители скорости: 0.25…4, как в page-hook. */
@@ -33,7 +51,7 @@ export interface PlaybackSource {
   mode: RoomMode;
   /** URL сайта для режима A. */
   url?: string;
-  /** Имя локального файла для режима C — только для интерфейса. */
+  /** Имя файла для режима B (у хоста) или C — только для интерфейса. */
   fileName?: string;
   size?: number;
   duration: number;
@@ -145,6 +163,118 @@ export interface ResyncData {
 
 export interface SiteUrlData {
   url: string;
+}
+
+/**
+ * Как хост захватил кадр: прямой `video.captureStream()` или фоллбэк
+ * canvas + WebAudio (§2.3, этап 5). Поле нужно зрителю для диагностики.
+ */
+export type StreamCaptureKind = 'direct' | 'canvas';
+
+/** `stream-start` (§4.3): хост начал раздавать файл. */
+export interface StreamStartData {
+  fileName?: string;
+  /** Хеш файла, если хост смог его посчитать: сейчас не обязателен. */
+  videoHash?: string;
+  duration?: number;
+  /** Максимум зрителей, которых принимает хост (1–2 по §4.1). */
+  maxViewers: number;
+  capture: StreamCaptureKind;
+}
+
+/** `stream-stop` (§4.3): раздача окончена; зритель показывает заглушку. */
+export interface StreamStopData {
+  reason?: 'host-stop' | 'error' | 'ended';
+}
+
+/** `capability` (§4.3): может ли хост вообще захватывать видео. */
+export interface CapabilityData {
+  canCapture: boolean;
+  maxViewers: number;
+  capture?: StreamCaptureKind;
+  videoHash?: string;
+}
+
+export function isStreamCaptureKind(value: unknown): value is StreamCaptureKind {
+  return value === 'direct' || value === 'canvas';
+}
+
+export function isStreamStartData(value: unknown): value is StreamStartData {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (
+    typeof data.maxViewers !== 'number' ||
+    !Number.isInteger(data.maxViewers) ||
+    data.maxViewers < 1 ||
+    data.maxViewers > STREAM_MAX_VIEWERS
+  ) {
+    return false;
+  }
+  if (!isStreamCaptureKind(data.capture)) {
+    return false;
+  }
+  if (
+    data.fileName !== undefined &&
+    (typeof data.fileName !== 'string' || data.fileName.length > STREAM_FILE_NAME_MAX)
+  ) {
+    return false;
+  }
+  if (
+    data.videoHash !== undefined &&
+    (typeof data.videoHash !== 'string' || data.videoHash.length > 128)
+  ) {
+    return false;
+  }
+  if (
+    data.duration !== undefined &&
+    (typeof data.duration !== 'number' || !Number.isFinite(data.duration) || data.duration < 0)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isStreamStopData(value: unknown): value is StreamStopData {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  return (
+    data.reason === undefined ||
+    data.reason === 'host-stop' ||
+    data.reason === 'error' ||
+    data.reason === 'ended'
+  );
+}
+
+export function isCapabilityData(value: unknown): value is CapabilityData {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const data = value as Record<string, unknown>;
+  if (typeof data.canCapture !== 'boolean') {
+    return false;
+  }
+  if (
+    typeof data.maxViewers !== 'number' ||
+    !Number.isInteger(data.maxViewers) ||
+    data.maxViewers < 0 ||
+    data.maxViewers > STREAM_MAX_VIEWERS
+  ) {
+    return false;
+  }
+  if (data.capture !== undefined && !isStreamCaptureKind(data.capture)) {
+    return false;
+  }
+  if (
+    data.videoHash !== undefined &&
+    (typeof data.videoHash !== 'string' || data.videoHash.length > 128)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export interface ByeData {
@@ -741,7 +871,7 @@ export function isValidState(value: unknown, from: string): value is StateData {
     return false;
   }
   const source = src as Record<string, unknown>;
-  if (source.mode !== 'site' && source.mode !== 'local') {
+  if (source.mode !== 'site' && source.mode !== 'local' && source.mode !== 'stream') {
     return false;
   }
   if (typeof source.duration !== 'number' || !Number.isFinite(source.duration) || source.duration < 0) {
@@ -750,7 +880,10 @@ export function isValidState(value: unknown, from: string): value is StateData {
   if (source.url !== undefined && typeof source.url !== 'string') {
     return false;
   }
-  if (source.fileName !== undefined && typeof source.fileName !== 'string') {
+  if (
+    source.fileName !== undefined &&
+    (typeof source.fileName !== 'string' || source.fileName.length > STREAM_FILE_NAME_MAX)
+  ) {
     return false;
   }
   if (source.size !== undefined && typeof source.size !== 'number') {

@@ -4,7 +4,7 @@ import { formatTime, type PlaybackView } from '../../app/playback';
 interface BottomBarProps {
   view: PlaybackView;
   label: string;
-  mode: 'site' | 'local';
+  mode: 'site' | 'local' | 'stream';
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onTogglePlay: () => void;
@@ -15,6 +15,8 @@ interface BottomBarProps {
   onSyncToMe: () => void;
   canSync: boolean;
   driverLabel?: string;
+  /** Режим B у зрителя: смотреть можно, управлять нельзя. */
+  viewOnly?: boolean;
 }
 
 const RATES = [0.75, 1, 1.25, 1.5] as const;
@@ -33,8 +35,10 @@ export function BottomBar({
   onSyncToMe,
   canSync,
   driverLabel,
+  viewOnly = false,
 }: BottomBarProps) {
   const { found, playing, time, duration, rate } = view;
+  const locked = viewOnly || !found;
 
   return (
     <footer
@@ -67,6 +71,11 @@ export function BottomBar({
                 файл
               </span>
             )}
+            {mode === 'stream' && (
+              <span className="hw-badge hw-badge--live" title="Файл хоста раздаётся">
+                эфир
+              </span>
+            )}
             <span className="hw-time">
               {found ? `${formatTime(time)} / ${formatTime(duration)}` : '—'}
             </span>
@@ -85,7 +94,7 @@ export function BottomBar({
               type="button"
               className="hw-tbtn"
               onClick={() => onSeek(-10)}
-              disabled={!found}
+              disabled={locked}
               aria-label="Назад на 10 секунд"
             >
               −10 с
@@ -94,8 +103,8 @@ export function BottomBar({
               type="button"
               className="hw-play"
               onClick={onTogglePlay}
-              disabled={!found}
-              aria-label={playing ? 'Пауза' : 'Играть'}
+              disabled={locked}
+              aria-label={viewOnly ? 'Управляет хост' : playing ? 'Пауза' : 'Играть'}
             >
               <Icon name={playing ? 'pause' : 'play'} size={24} />
             </button>
@@ -103,7 +112,7 @@ export function BottomBar({
               type="button"
               className="hw-tbtn"
               onClick={() => onSeek(10)}
-              disabled={!found}
+              disabled={locked}
               aria-label="Вперёд на 10 секунд"
             >
               +10 с
@@ -112,7 +121,7 @@ export function BottomBar({
               type="button"
               className="hw-tbtn hw-tbtn--sync"
               onClick={onSyncToMe}
-              disabled={!canSync}
+              disabled={!canSync || viewOnly}
               aria-label="Синхронизировать всех ко мне"
             >
               Ко мне
@@ -137,12 +146,13 @@ export function BottomBar({
                 type="button"
                 className={`hw-rate${Math.abs(rate - value) < 0.01 ? ' is-active' : ''}`}
                 onClick={() => onRate(value)}
-                disabled={!found}
+                disabled={locked}
               >
                 {value}×
               </button>
             ))}
             {driverLabel && <span className="hw-driver">{driverLabel}</span>}
+            {viewOnly && <span className="hw-driver">управляет хост</span>}
           </div>
         </>
       )}

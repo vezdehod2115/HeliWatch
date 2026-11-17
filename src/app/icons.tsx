@@ -20,6 +20,7 @@ export type IconName =
   | 'send'
   | 'photo'
   | 'history'
+  | 'broadcast'
   | 'pip';
 
 interface IconProps {
@@ -190,6 +191,14 @@ export function Icon({ name, size = 20 }: IconProps) {
           <path d="M4 12a8 8 0 1 0 2.3-5.6" />
           <path d="M4 5v4h4" />
           <path d="M12 8v4.5l3 1.8" />
+        </svg>
+      );
+    case 'broadcast':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" />
+          <path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4" />
+          <path d="M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2" />
         </svg>
       );
     case 'pip':

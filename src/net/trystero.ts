@@ -71,9 +71,17 @@ type RoomLike = {
   makeAction: (namespace: string) => ActionLike;
   onPeerJoin: ((peerId: string) => void) | null;
   onPeerLeave: ((peerId: string) => void) | null;
-  onPeerStream: ((stream: MediaStream, peerId: string, metadata?: unknown) => void) | null;
+  onPeerStream: ((
+    stream: MediaStream,
+    peerId: string,
+    metadata?: JsonValue,
+  ) => void) | null;
   getPeers: () => Record<string, RTCPeerConnection>;
-  addStream: (stream: MediaStream, options?: { target?: string }) => Promise<void>[];
+  addStream: (
+    stream: MediaStream,
+    options?: { target?: string; metadata?: JsonValue },
+  ) => Promise<void>[];
+  removeStream: (stream: MediaStream, options?: { target?: string }) => void;
   leave: () => Promise<void>;
 };
 
@@ -136,7 +144,9 @@ class TrysteroChannel implements Channel {
   onPeerLeave: ((peerId: string) => void) | null = null;
   onMessage: ((data: unknown, peerId: string) => void) | null = null;
   onBlobMessage: ((data: unknown, peerId: string) => void) | null = null;
-  onPeerStream: ((stream: MediaStream, peerId: string) => void) | null = null;
+  onPeerStream:
+    | ((stream: MediaStream, peerId: string, metadata?: unknown) => void)
+    | null = null;
 
   private readonly room: RoomLike;
   private readonly getRelaySockets?: RelayGetter;
@@ -147,6 +157,8 @@ class TrysteroChannel implements Channel {
   private micMuted = false;
   /** Sender'ы микрофона по пирам: нужны, когда трек снят через replaceTrack(null). */
   private readonly micSenders = new Map<string, RTCRtpSender>();
+  /** Стрим файла хоста: кеш нужен, чтобы отдать его поздно подключившемуся пиру. */
+  private screenStream: MediaStream | null = null;
   private closed = false;
 
   constructor(
@@ -180,7 +192,7 @@ class TrysteroChannel implements Channel {
       if (this.closed) {
         return;
       }
-      // Поздно подключившемуся пиру микрофон нужен без повторного getUserMedia.
+      // Поздно подключившемуся пиру микрофон нужен без getUserMedia.
       if (this.micTrack) {
         this.sendMicTo(peerId);
       }
@@ -192,9 +204,9 @@ class TrysteroChannel implements Channel {
         this.onPeerLeave?.(peerId);
       }
     };
-    room.onPeerStream = (stream, peerId) => {
+    room.onPeerStream = (stream, peerId, metadata) => {
       if (!this.closed) {
-        this.onPeerStream?.(stream, peerId);
+        this.onPeerStream?.(stream, peerId, metadata);
       }
     };
   }
@@ -234,7 +246,9 @@ class TrysteroChannel implements Channel {
     this.micMuted = !track.enabled;
     try {
       // Первое включение микрофона: одна renegotiation на соединение (§4.6).
-      const pending = this.room.addStream(stream);
+      const pending = this.room.addStream(stream, {
+        metadata: { kind: 'voice' },
+      });
       void Promise.all(pending)
         .then(() => {
           if (this.closed) {
@@ -266,6 +280,45 @@ class TrysteroChannel implements Channel {
     this.applyMicMuted(muted);
   }
 
+  // ---------- Стрим файла хоста (этап 5) ----------
+
+  addScreenStream(stream: MediaStream, peerId?: string): void {
+    if (this.closed || stream.getVideoTracks().length === 0) {
+      return;
+    }
+    this.screenStream = stream;
+    if (peerId) {
+      // Новый зритель получает поток только после успешного welcome.
+      this.sendScreenTo(peerId, stream);
+      return;
+    }
+    try {
+      const pending = this.room.addStream(stream, {
+        metadata: { kind: 'screen' },
+      });
+      void Promise.all(pending).catch((error: unknown) => {
+        console.warn('[heliwatch] не удалось добавить видеопоток', error);
+      });
+    } catch (error) {
+      console.warn('[heliwatch] addStream видеопотока упал', error);
+    }
+  }
+
+  removeScreenStream(stream: MediaStream): void {
+    if (this.screenStream === stream) {
+      this.screenStream = null;
+    }
+    if (this.closed) {
+      return;
+    }
+    try {
+      // removeStream сам инициирует renegotiation на каждом соединении.
+      this.room.removeStream(stream);
+    } catch (error) {
+      console.warn('[heliwatch] не удалось убрать видеопоток', error);
+    }
+  }
+
   knownPeers(): string[] {
     if (this.closed) {
       return [];
@@ -294,6 +347,7 @@ class TrysteroChannel implements Channel {
     this.micTrack = null;
     this.micStream = null;
     this.micSenders.clear();
+    this.screenStream = null;
     void this.room.leave().catch(() => undefined);
   }
 
@@ -359,7 +413,10 @@ class TrysteroChannel implements Channel {
     }
     try {
       // Поздний пир получает микрофон своим addStream — в рамках его соединения.
-      const pending = this.room.addStream(stream, { target: peerId });
+      const pending = this.room.addStream(stream, {
+        target: peerId,
+        metadata: { kind: 'voice' },
+      });
       void Promise.all(pending)
         .then(() => {
           if (this.closed) {
@@ -375,6 +432,20 @@ class TrysteroChannel implements Channel {
         });
     } catch (error) {
       console.warn('[heliwatch] getPeers недоступен', error);
+    }
+  }
+
+  private sendScreenTo(peerId: string, stream: MediaStream): void {
+    try {
+      const pending = this.room.addStream(stream, {
+        target: peerId,
+        metadata: { kind: 'screen' },
+      });
+      void Promise.all(pending).catch((error: unknown) => {
+        console.warn('[heliwatch] видеопоток для нового пира не добавлен', error);
+      });
+    } catch (error) {
+      console.warn('[heliwatch] getPeers недоступен для видеопотока', error);
     }
   }
 

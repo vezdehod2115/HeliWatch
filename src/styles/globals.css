@@ -2124,3 +2124,154 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ==================== Этап 5: стрим файла хоста ==================== */
+
+/*
+ * Режим B: видео хоста приходит зрителям MediaStream-треком. Визуально это
+ * тот же чёрный плеер, что и локальный файл, но без выбора файла и перемотки.
+ */
+.hw-app--stream .hw-mid {
+  background: #000;
+}
+
+.hw-streambar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 calc(var(--hw-safe-right) + 10px) 2px calc(var(--hw-safe-left) + 10px);
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-hw-line);
+  background: linear-gradient(155deg, rgb(13 46 42 / 0.95), rgb(5 25 23 / 0.93));
+  color: var(--color-hw-muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.hw-streambar-text {
+  color: var(--color-hw-accent);
+  font-weight: 650;
+  flex: none;
+}
+
+.hw-streambar-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-hw-dim, #7f9f98);
+}
+
+.hw-livechip {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgb(255 90 106 / 0.16);
+  border: 1px solid rgb(255 90 106 / 0.42);
+  color: #ffd9dd;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.hw-badge--live {
+  background: rgb(255 90 106 / 0.16);
+  border-color: rgb(255 90 106 / 0.42);
+  color: #ffd9dd;
+}
+
+.hw-streamplayer {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  pointer-events: auto;
+  background: #000;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hw-streamplayer-wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 20px;
+  text-align: center;
+  background: radial-gradient(circle at 50% 42%, rgb(9 44 39 / 0.9), rgb(2 12 11 / 0.97));
+  color: var(--color-hw-muted);
+  font-size: 11.5px;
+}
+
+.hw-streamplayer-wait strong {
+  max-width: 84%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-hw-ink);
+  font-size: 14px;
+}
+
+.hw-streamplayer-wait p {
+  margin: 0;
+  max-width: 290px;
+  line-height: 1.45;
+}
+
+.hw-streamplayer-wait .hw-primary {
+  min-width: 160px;
+}
+
+.hw-streamplayer-host {
+  color: var(--color-hw-dim, #7f9f98);
+  font-size: 10.5px;
+}
+
+.hw-streamplayer-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(var(--hw-safe-bottom) + 8px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgb(3 20 18 / 0.72);
+  border: 1px solid var(--color-hw-line);
+  color: var(--color-hw-muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.hw-streamplayer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hw-streamplayer-view {
+  flex: none;
+  color: var(--color-hw-accent);
+  font-size: 10px;
+}
+
+.hw-spinner.is-idle {
+  border-top-color: var(--color-hw-dim, #7f9f98);
+  animation: none;
+  opacity: 0.6;
+}
+
+/* В PiP служебные полосы не нужны: остаётся видео и строка сообщения. */
+.hw-app--pip .hw-streambar,
+.hw-app--pip .hw-streamplayer-bar {
+  display: none;
+}

@@ -22,6 +22,7 @@ import {
   createEnvelope,
   createNonce,
   createUlid,
+  isCapabilityData,
   isChatPayload,
   isEmojiSequence,
   isEnvelope,
@@ -30,14 +31,18 @@ import {
   isNonceFresh,
   isReactionPayload,
   isStateRefresh,
+  isStreamStartData,
+  isStreamStopData,
   isTypingPayload,
   isValidState,
   normalizeChatText,
   normalizeRoomCode,
+  roomLimitForMode,
   sampleFromState,
   shouldApplyState,
   stateFromSample,
   type ByeData,
+  type CapabilityData,
   type ChatMessage,
   type Envelope,
   type HelloData,
@@ -55,6 +60,8 @@ import {
   type RoomRole,
   type SiteUrlData,
   type StateVersion,
+  type StreamStartData,
+  type StreamStopData,
   type TypingPayload,
   type WelcomeData,
 } from './protocol';
@@ -111,6 +118,15 @@ export type RoomEvent =
     }
   | { type: 'image-error'; id: string; reason: string }
   | { type: 'voice-stream'; peerId: string; userId: string | null; stream: MediaStream }
+  | {
+      type: 'screen-stream';
+      peerId: string;
+      userId: string | null;
+      stream: MediaStream;
+    }
+  | { type: 'stream-start'; info: StreamStartData }
+  | { type: 'stream-stop'; reason: string }
+  | { type: 'capability'; capability: CapabilityData }
   | { type: 'peer-left'; peerId: string; userId?: string }
   | { type: 'debug'; peers: number; seq: number; driverId: string | null }
   | { type: 'error'; message: string }
@@ -276,6 +292,14 @@ export class RoomClient {
   /** Отменённые пользователем исходящие фото. */
   private readonly cancelledImages = new Set<string>();
   private readonly images: ImageReceiver;
+  /** Исходящий стрим файла хоста: переживает реконнект, как и микрофон. */
+  private screenStream: MediaStream | null = null;
+  /** Последний stream-start: его получает и поздно подключившийся зритель. */
+  private streamInfo: StreamStartData | null = null;
+  private streamActive = false;
+  private capability: CapabilityData | null = null;
+  /** Поток, пришедший раньше welcome: отдаём зрителю после авторизации. */
+  private readonly pendingScreens = new Map<string, MediaStream>();
 
   constructor(options: RoomClientOptions) {
     const code = normalizeRoomCode(options.code);
@@ -297,7 +321,7 @@ export class RoomClient {
       code,
       title: `Комната ${code}`,
       mode: options.mode,
-      limit: ROOM_LIMIT_DEFAULT,
+      limit: roomLimitForMode(options.mode),
       closed: false,
       knock: false,
     };
@@ -378,6 +402,15 @@ export class RoomClient {
     });
   }
 
+  /** Идёт ли раздача файла с этого устройства (режим B, этап 5). */
+  get streaming(): boolean {
+    return this.streamActive;
+  }
+
+  get lastStreamInfo(): StreamStartData | null {
+    return this.streamInfo;
+  }
+
   // ---------- Запуск и остановка ----------
 
   async start(): Promise<void> {
@@ -403,6 +436,10 @@ export class RoomClient {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
     this.images.dispose();
+    this.screenStream = null;
+    this.streamActive = false;
+    this.streamInfo = null;
+    this.pendingScreens.clear();
     this.disposeChannel();
     this.setPhase('closed');
     this.emit({ type: 'closed', reason });
@@ -420,7 +457,7 @@ export class RoomClient {
    * команду для мгновенного применения у остальных.
    */
   publishAction(action: PlaybackAction, sample: PlaybackSample): void {
-    if (!this.canPublish()) {
+    if (!this.canControl()) {
       return;
     }
     const source = this.sourceWithDuration(sample);
@@ -435,7 +472,7 @@ export class RoomClient {
 
   /** «Синхронизировать ко мне»: стать driver'ом и разослать своё состояние. */
   takeover(sample: PlaybackSample): void {
-    if (!this.canPublish()) {
+    if (!this.canControl()) {
       return;
     }
     const seq = this.stateValue.seq + 1;
@@ -456,7 +493,7 @@ export class RoomClient {
 
   /** Смена источника (URL сайта или выбранный файл). */
   publishSource(source: PlaybackSource, sample: PlaybackSample): void {
-    if (!this.canPublish()) {
+    if (!this.canControl()) {
       return;
     }
     const seq = this.stateValue.seq + 1;
@@ -474,7 +511,7 @@ export class RoomClient {
 
   /** Хост сменил URL сайта: state + отдельное сообщение site-url. */
   publishSiteUrl(url: string): void {
-    if (this.role !== 'host' || !this.canPublish()) {
+    if (this.role !== 'host' || !this.canControl()) {
       return;
     }
     const seq = this.stateValue.seq + 1;
@@ -488,6 +525,64 @@ export class RoomClient {
     const data: SiteUrlData = { url };
     this.sendState();
     this.send('site-url', data);
+  }
+
+  // ---------- Стрим файла хоста (этап 5) ----------
+
+  /** Подключить исходящий видеопоток. Поздние зрители получат его сами. */
+  attachScreen(stream: MediaStream): void {
+    this.screenStream = stream;
+    this.channelValue?.addScreenStream?.(stream);
+  }
+
+  /** Остановить раздачу на транспорте, не трогая сами треки. */
+  detachScreen(): void {
+    const stream = this.screenStream;
+    this.screenStream = null;
+    if (stream) {
+      this.channelValue?.removeScreenStream?.(stream);
+    }
+  }
+
+  /** `stream-start`: хост начал раздавать файл (только режим B). */
+  publishStreamStart(info: StreamStartData): void {
+    if (
+      this.role !== 'host' ||
+      this.meta.mode !== 'stream' ||
+      !this.canControl() ||
+      !isStreamStartData(info)
+    ) {
+      return;
+    }
+    this.streamInfo = info;
+    this.streamActive = true;
+    this.send('stream-start', info);
+  }
+
+  /** `stream-stop`: раздача окончена; у зрителей гаснет картинка. */
+  publishStreamStop(reason: StreamStopData['reason'] = 'host-stop'): void {
+    if (this.role !== 'host' || !this.canPublish()) {
+      return;
+    }
+    const wasActive = this.streamActive;
+    this.streamActive = false;
+    this.streamInfo = null;
+    if (wasActive) {
+      const data: StreamStopData = { reason };
+      this.send('stream-stop', data);
+    }
+  }
+
+  /** `capability`: честно сообщаем, умеет ли устройство захватывать видео. */
+  publishCapability(capability: CapabilityData): void {
+    if (this.role !== 'host' || this.meta.mode !== 'stream' || !this.canPublish()) {
+      return;
+    }
+    if (!isCapabilityData(capability)) {
+      return;
+    }
+    this.capability = capability;
+    this.send('capability', capability);
   }
 
   /** Отметить локальное воспроизведение и, если нужно, скорректировать. */
@@ -675,6 +770,10 @@ export class RoomClient {
       // После реконнекта микрофон возвращаем в новое соединение.
       channel.addStream?.(this.voiceStream);
     }
+    if (this.screenStream) {
+      // Раздача файла тоже переживает смену стратегии сигналинга.
+      channel.addScreenStream?.(this.screenStream);
+    }
     this.emit({ type: 'strategy', strategy, relays: this.relayCountValue() });
     this.emitMembers();
     this.armConnectCheck();
@@ -711,11 +810,34 @@ export class RoomClient {
           console.warn('[heliwatch] ошибка приёма чанка фото', error);
         });
     };
-    channel.onPeerStream = (stream, peerId) => {
+    channel.onPeerStream = (stream, peerId, metadata) => {
+      const peer = this.peers.get(peerId);
+      const meta = isRecord(metadata) ? metadata : null;
+      const screen =
+        meta?.kind === 'screen' ||
+        (meta?.kind !== 'voice' && stream.getVideoTracks().length > 0);
+      if (screen) {
+        // Стрим файла хоста: зритель рисует его отдельным <video>. Метаданные
+        // и медиа могут обогнать welcome — поток придержим до авторизации.
+        if (
+          peer?.joined ||
+          (this.role === 'guest' && peer?.userId && peer.userId === this.hostUserId)
+        ) {
+          this.emit({
+            type: 'screen-stream',
+            peerId,
+            userId: peer?.userId ?? null,
+            stream,
+          });
+        } else if (this.role === 'guest') {
+          this.pendingScreens.set(peerId, stream);
+        }
+        return;
+      }
       this.emit({
         type: 'voice-stream',
         peerId,
-        userId: this.peers.get(peerId)?.userId ?? null,
+        userId: peer?.userId ?? null,
         stream,
       });
     };
@@ -858,6 +980,14 @@ export class RoomClient {
     return !this.stopped && this.phaseValue === 'joined' && this.channelValue !== null;
   }
 
+  /**
+   * Кто управляет воспроизведением: в режиме B (файл хоста) — только хост,
+   * зритель получает уже собранный поток и не может перемотать его у себя.
+   */
+  private canControl(): boolean {
+    return this.canPublish() && !(this.meta.mode === 'stream' && this.role === 'guest');
+  }
+
   // ---------- Входящие сообщения ----------
 
   private async handleMessage(raw: unknown, peerId: string): Promise<void> {
@@ -913,6 +1043,19 @@ export class RoomClient {
         return;
       case 'site-url':
         this.handleSiteUrl(raw);
+        return;
+      case 'stream-start':
+        this.handleStreamStart(raw);
+        return;
+      case 'stream-stop':
+        if (isStreamStopData(raw.d)) {
+          this.emit({ type: 'stream-stop', reason: raw.d.reason ?? 'host-stop' });
+        }
+        return;
+      case 'capability':
+        if (isCapabilityData(raw.d)) {
+          this.emit({ type: 'capability', capability: raw.d });
+        }
         return;
       case 'bye':
         this.handleBye(raw, peer);
@@ -1052,6 +1195,7 @@ export class RoomClient {
   private handlePeerLeave(peerId: string): void {
     const peer = this.peers.get(peerId);
     this.peers.delete(peerId);
+    this.pendingScreens.delete(peerId);
     if (peer?.userId) {
       this.members.delete(peer.userId);
       this.emit({
@@ -1215,6 +1359,16 @@ export class RoomClient {
       this.hostUserId = this.selfUserId;
     }
     await this.sendWelcome(peerId);
+    // Поздно подключившийся зритель узнаёт о текущей раздаче и возможностях.
+    if (this.streamActive && this.screenStream) {
+      this.channelValue?.addScreenStream?.(this.screenStream, peerId);
+    }
+    if (this.streamActive && this.streamInfo) {
+      this.send('stream-start', this.streamInfo, peerId);
+    }
+    if (this.meta.mode === 'stream' && this.capability) {
+      this.send('capability', this.capability, peerId);
+    }
     this.setPhase('joined');
     this.reconnects = 0;
     this.emitDebug();
@@ -1269,7 +1423,10 @@ export class RoomClient {
       return;
     }
     const room = data.room as RoomMeta;
-    if (room.code !== this.code || (room.mode !== 'site' && room.mode !== 'local')) {
+    if (
+      room.code !== this.code ||
+      (room.mode !== 'site' && room.mode !== 'local' && room.mode !== 'stream')
+    ) {
       this.emit({ type: 'error', message: 'Welcome от другой комнаты' });
       return;
     }
@@ -1315,6 +1472,16 @@ export class RoomClient {
     this.stateReceivedAt = this.now();
     this.reconnects = 0;
     this.setPhase('joined');
+    const pendingScreen = this.pendingScreens.get(peerId);
+    if (pendingScreen) {
+      this.pendingScreens.delete(peerId);
+      this.emit({
+        type: 'screen-stream',
+        peerId,
+        userId: hostPeer.userId,
+        stream: pendingScreen,
+      });
+    }
     this.emitMembers();
     this.emit({
       type: 'joined',
@@ -1424,6 +1591,19 @@ export class RoomClient {
       src: { mode: 'site', url: data.url, duration: this.stateValue.src.duration },
     };
     this.emit({ type: 'site-url', url: data.url });
+  }
+
+  private handleStreamStart(envelope: { from: string; d: unknown }): void {
+    if (
+      this.role !== 'guest' ||
+      this.meta.mode !== 'stream' ||
+      envelope.from !== this.hostUserId ||
+      !isStreamStartData(envelope.d)
+    ) {
+      return;
+    }
+    this.emit({ type: 'stream-start', info: envelope.d });
+    this.emit({ type: 'hint', message: null });
   }
 
   private handleBye(envelope: { from: string; d: unknown }, peer: PeerAuth): void {

@@ -3,6 +3,19 @@ import { BottomBar } from '../site/BottomBar';
 import { TopBar } from '../site/TopBar';
 import { RoomBar } from './RoomBar';
 import { LocalPlayer, type LocalPlayerHandle } from '../localplay/LocalPlayer';
+import {
+  RemoteStreamPlayer,
+  type RemoteStreamPlayerHandle,
+} from '../videofile/RemoteStreamPlayer';
+import { describeCaptureError, isMkvName } from '../../media/capture';
+import { StreamEngine } from '../../media/stream';
+import {
+  STREAM_MKV_WARNING,
+  STREAM_VIEWER_WARNING,
+  captureLabel,
+  streamStatusLine,
+  viewersLabel,
+} from '../videofile/streamCopy';
 import { ChatDock } from '../chat/ChatDock';
 import { ChatPanel } from '../chat/ChatPanel';
 import { FloatingReactions } from '../chat/Reactions';
@@ -16,12 +29,14 @@ import { roomLink } from '../../net/protocol';
 import {
   actionFromVideoEvent,
   projectState,
+  STREAM_MAX_VIEWERS,
   type ChatMessage,
   type PlaybackAction,
   type PlaybackSample,
   type PlaybackState,
   type RoomMode,
   type RoomRole,
+  type StreamStartData,
 } from '../../net/protocol';
 import type { Identity } from '../../net/identity';
 import { RoomClient, type RoomEvent } from '../../net/room';
@@ -129,10 +144,22 @@ export function RoomScreen({
   const [speaking, setSpeaking] = useState<Record<string, string>>({});
   const [pipActive, setPipActive] = useState(false);
   const [pipSupported, setPipSupported] = useState(true);
+  // Стрим файла хоста (этап 5): у хоста — исходящий поток, у зрителя — входящий.
+  const [hostStreaming, setHostStreaming] = useState(false);
+  const [streamInfo, setStreamInfo] = useState<StreamStartData | null>(null);
+  const [streamStarted, setStreamStarted] = useState(false);
+  const [streamStopped, setStreamStopped] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [remotePlaying, setRemotePlaying] = useState(false);
+  const [remoteDimensions, setRemoteDimensions] = useState({ width: 0, height: 0 });
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
   const localRef = useRef<LocalPlayerHandle>(null);
+  const remoteRef = useRef<RemoteStreamPlayerHandle>(null);
+  const streamEngineRef = useRef<StreamEngine | null>(null);
+  const streamInfoRef = useRef<StreamStartData | null>(null);
   const localFileRef = useRef<LocalFile | null>(null);
   const modeRef = useRef<RoomMode>(initialMode ?? 'site');
   const applyingRemoteUntil = useRef(0);
@@ -173,6 +200,7 @@ export function RoomScreen({
   siteRef.current = site;
   modeRef.current = snapshot.mode;
   localFileRef.current = localFile;
+  streamInfoRef.current = streamInfo;
   viewerRef.current = viewerImageId;
   memberNameRef.current = (peerId: string) => {
     const member = useRoomStore
@@ -191,22 +219,36 @@ export function RoomScreen({
     const file = localFileRef.current;
     const messages = useChatStore.getState().messages;
     const last = messages.length > 0 ? messages[messages.length - 1] : null;
+    const streamFile =
+      streamInfoRef.current?.fileName ?? state.playback?.src.fileName ?? file?.name ?? '';
     const dimensions =
       mode === 'site'
         ? { width: siteVideo.width, height: siteVideo.height }
-        : (local?.dimensions() ?? { width: 0, height: 0 });
+        : mode === 'stream' && role === 'guest'
+          ? remoteDimensions
+          : (local?.dimensions() ?? { width: 0, height: 0 });
     return {
       code,
-      title: mode === 'site' ? siteRef.current.status.title : (file?.name ?? ''),
+      title:
+        mode === 'site'
+          ? siteRef.current.status.title
+          : mode === 'stream'
+            ? streamFile
+            : (file?.name ?? ''),
       mode,
       roomActive: state.phase === 'joined',
-      playing: mode === 'site' ? siteVideo.playing : (local?.sample().playing ?? false),
+      playing:
+        mode === 'site'
+          ? siteVideo.playing
+          : mode === 'stream' && role === 'guest'
+            ? remotePlaying
+            : (local?.sample().playing ?? false),
       micOn: voiceActive && !voiceMuted,
       message: pipMessageLine(last),
       videoWidth: dimensions.width,
       videoHeight: dimensions.height,
     };
-  }, [code, voiceActive, voiceMuted]);
+  }, [code, voiceActive, voiceMuted, role, remoteDimensions, remotePlaying]);
 
   useEffect(() => {
     void readSessionInfo().then((info) => {
@@ -666,6 +708,8 @@ export function RoomScreen({
       apply: (volume) => {
         if (modeRef.current === 'site') {
           siteRef.current.setVolume(volume);
+        } else if (modeRef.current === 'stream' && role === 'guest') {
+          remoteRef.current?.setVolume(volume);
         } else {
           localRef.current?.setVolume(volume);
         }
@@ -697,6 +741,23 @@ export function RoomScreen({
             error: null,
           });
           onJoinedRef.current(code, event.meta.mode);
+          if (event.meta.mode === 'stream') {
+            // Поток мог прийти раньше welcome — не выбрасываем его.
+            setStreamStarted(false);
+            setStreamStopped(false);
+            setStreamError(null);
+            // Имя файла уже в state: зритель видит его до прихода потока.
+            if (event.state.src.fileName) {
+              const info: StreamStartData = {
+                fileName: event.state.src.fileName,
+                duration: event.state.src.duration,
+                maxViewers: STREAM_MAX_VIEWERS,
+                capture: 'direct',
+              };
+              streamInfoRef.current = info;
+              setStreamInfo(info);
+            }
+          }
           if (event.meta.mode === 'site') {
             if (event.state.src.url) {
               lastPublishedUrl.current = event.state.src.url;
@@ -832,6 +893,36 @@ export function RoomScreen({
           setRemoteStreams((prev) => ({ ...prev, [event.peerId]: event.stream }));
           voiceEngineRef.current?.attachRemote(event.peerId, event.stream);
           break;
+        case 'screen-stream':
+          setRemoteStream(event.stream);
+          setRemotePlaying(false);
+          setStreamStarted(true);
+          setStreamStopped(false);
+          setStreamError(null);
+          break;
+        case 'stream-start':
+          setStreamInfo(event.info);
+          streamInfoRef.current = event.info;
+          setStreamStarted(true);
+          setStreamStopped(false);
+          setStreamError(null);
+          notifyRef.current(
+            `Хост раздаёт ${event.info.fileName ?? 'файл'}${event.info.capture === 'canvas' ? ' (canvas-фоллбэк)' : ''}`,
+          );
+          break;
+        case 'stream-stop':
+          setRemoteStream(null);
+          setRemotePlaying(false);
+          setStreamStarted(false);
+          setStreamStopped(true);
+          break;
+        case 'capability':
+          if (!event.capability.canCapture) {
+            setStreamError(
+              'Хост не может раздавать видео на этом устройстве: файл не открылся',
+            );
+          }
+          break;
         case 'error':
           store.patch({ error: event.message });
           notifyRef.current(event.message);
@@ -856,6 +947,14 @@ export function RoomScreen({
             return next;
           });
           voiceEngineRef.current?.detachRemote(event.peerId);
+          if (
+            useRoomStore.getState().mode === 'stream' &&
+            event.userId === useRoomStore.getState().hostUserId
+          ) {
+            setRemoteStream(null);
+            setRemotePlaying(false);
+            setStreamStopped(true);
+          }
           break;
         case 'debug':
           store.patch({ peerCount: event.peers, driverId: event.driverId });
@@ -1042,8 +1141,97 @@ export function RoomScreen({
     }
   }, [site.status.backRootAt, leave]);
 
+  const stopHostStream = useCallback(
+    (reason: 'host-stop' | 'error' | 'ended' = 'host-stop') => {
+      setHostStreaming(false);
+      const engine = streamEngineRef.current;
+      streamEngineRef.current = null;
+      engine?.stop();
+      const client = clientRef.current;
+      if (client) {
+        client.publishStreamStop(reason);
+        client.detachScreen();
+      }
+    },
+    [],
+  );
+
+  const startHostStream = useCallback(
+    async (video: HTMLVideoElement | null, file: LocalFile, duration: number) => {
+      const client = clientRef.current;
+      if (!client || role !== 'host' || modeRef.current !== 'stream') {
+        return;
+      }
+      if (!video) {
+        notifyRef.current('Плеер не готов: выберите файл ещё раз');
+        return;
+      }
+      stopHostStream('host-stop');
+      const engine = new StreamEngine();
+      streamEngineRef.current = engine;
+      try {
+        const result = await engine.start(video);
+        if (streamEngineRef.current !== engine) {
+          // Комнату закрыли или выбрали другой файл, пока шёл захват.
+          engine.stop();
+          return;
+        }
+        // Если браузер уже разрешил звук — включаем; иначе сделаем это на play.
+        engine.resumeAudio();
+        setHostStreaming(true);
+        setStreamError(null);
+        client.attachScreen(result.stream);
+        const info: StreamStartData = {
+          fileName: file.name,
+          duration: duration || 0,
+          maxViewers: STREAM_MAX_VIEWERS,
+          capture: result.kind,
+        };
+        streamInfoRef.current = info;
+        setStreamInfo(info);
+        client.publishStreamStart(info);
+        client.publishCapability({
+          canCapture: true,
+          maxViewers: STREAM_MAX_VIEWERS,
+          capture: result.kind,
+        });
+        notifyRef.current(
+          `Раздача началась · ${captureLabel(result.kind)} · ${viewersLabel(
+            Math.max(0, useRoomStore.getState().members.length - 1),
+          )}`,
+        );
+      } catch (error: unknown) {
+        if (streamEngineRef.current !== engine) {
+          return;
+        }
+        streamEngineRef.current = null;
+        engine.stop();
+        setHostStreaming(false);
+        const message = describeCaptureError(error);
+        setStreamError(message);
+        notifyRef.current(message);
+        client.publishCapability({ canCapture: false, maxViewers: 0 });
+      }
+    },
+    [role, stopHostStream],
+  );
+
   const pickFile = useCallback(
     (file: File) => {
+      // Смена файла в режиме B: старую раздачу гасим до подмены blob-URL.
+      if (modeRef.current === 'stream' && role === 'host') {
+        stopHostStream('host-stop');
+        streamInfoRef.current = null;
+        setStreamInfo(null);
+        setStreamStarted(false);
+        setStreamStopped(false);
+        setStreamError(null);
+        if (isMkvName(file.name)) {
+          notifyRef.current(STREAM_MKV_WARNING);
+        } else {
+          notifyRef.current(STREAM_VIEWER_WARNING);
+        }
+      }
       const previous = localFileRef.current;
       if (previous) {
         URL.revokeObjectURL(previous.url);
@@ -1056,14 +1244,18 @@ export function RoomScreen({
       localFileRef.current = next;
       setLocalFile(next);
       setLocalView({ ...EMPTY_VIEW });
-      notifyRef.current(`Файл выбран: ${file.name}`);
+      if (modeRef.current !== 'stream') {
+        notifyRef.current(`Файл выбран: ${file.name}`);
+      }
     },
-    [],
+    [role, stopHostStream],
   );
 
-  // Освобождаем blob-URL при размонтировании.
+  // Освобождаем blob-URL и захват при размонтировании.
   useEffect(
     () => () => {
+      streamEngineRef.current?.stop();
+      streamEngineRef.current = null;
       const file = localFileRef.current;
       if (file) {
         URL.revokeObjectURL(file.url);
@@ -1088,6 +1280,24 @@ export function RoomScreen({
         rate: 1,
         duration: duration || 0,
       };
+      if (modeRef.current === 'stream' && role === 'host') {
+        clientRef.current?.publishSource(
+          {
+            mode: 'stream',
+            fileName: file.name,
+            size: file.size,
+            duration: duration || 0,
+          },
+          sample,
+        );
+        void startHostStream(localRef.current?.video() ?? null, file, duration);
+        setLocalView((current) => ({
+          ...current,
+          found: true,
+          duration: duration || current.duration,
+        }));
+        return;
+      }
       // Источник публикует хост (у него продолжительность в state) или
       // текущий driver. Просто выбор файла гостем не должен перехватывать
       // управление — иначе гость молча станет ведущим.
@@ -1114,8 +1324,12 @@ export function RoomScreen({
       }));
       notifyRef.current('Файл готов — время синхронизируется');
     },
-    [applyStateToLocal, identity.userId],
+    [applyStateToLocal, identity.userId, role, startHostStream],
   );
+
+  const onPlayed = useCallback(() => {
+    streamEngineRef.current?.resumeAudio();
+  }, []);
 
   const onProgress = useCallback((view: PlaybackView) => {
     setLocalView(view);
@@ -1146,6 +1360,15 @@ export function RoomScreen({
   );
 
   const siteVideo = site.status.video;
+  const streamViewer = snapshot.mode === 'stream' && role === 'guest';
+  const hostViewers = Math.max(0, snapshot.members.length - 1);
+  const streamFile =
+    streamInfo?.fileName ?? snapshot.playback?.src.fileName ?? localFile?.name ?? null;
+  const streamPlayback = snapshot.playback;
+  const streamTime =
+    streamPlayback && streamPlayback.src.mode === 'stream'
+      ? projectState(streamPlayback, snapshot.stateReceivedAt || Date.now(), Date.now())
+      : 0;
   const view: PlaybackView =
     snapshot.mode === 'site'
       ? {
@@ -1155,9 +1378,26 @@ export function RoomScreen({
           duration: siteVideo.duration,
           rate: siteVideo.rate,
         }
-      : localView;
+      : snapshot.mode === 'stream'
+        ? {
+            found: remoteStream !== null || streamStarted || Boolean(localFile),
+            playing: streamViewer
+              ? remotePlaying || streamPlayback?.playing === true
+              : localView.playing,
+            time: streamViewer ? streamTime : localView.time,
+            duration: streamPlayback?.src.duration ?? localView.duration,
+            rate: streamPlayback?.rate ?? localView.rate,
+          }
+        : localView;
 
-  const found = snapshot.mode === 'site' ? siteVideo.found : Boolean(localFile) && localView.found;
+  const found =
+    snapshot.mode === 'site'
+      ? siteVideo.found
+      : snapshot.mode === 'stream'
+        ? streamViewer
+          ? remoteStream !== null
+          : Boolean(localFile) && localView.found
+        : Boolean(localFile) && localView.found;
   const label =
     snapshot.mode === 'site'
       ? siteVideo.found
@@ -1165,9 +1405,13 @@ export function RoomScreen({
           ? 'Играет'
           : 'Пауза'
         : 'Видео не найдено'
-      : localFile
-        ? localFile.name
-        : 'Файл не выбран';
+      : snapshot.mode === 'stream'
+        ? streamViewer
+          ? streamFile ?? (streamStopped ? 'Раздача остановлена' : 'Ждём файл хоста')
+          : streamFile ?? 'Файл не выбран'
+        : localFile
+          ? localFile.name
+          : 'Файл не выбран';
 
   // Экран не гаснет, пока комната открыта и идёт воспроизведение (этап 4).
   useEffect(() => {
@@ -1175,11 +1419,21 @@ export function RoomScreen({
   }, [snapshot.phase, view.playing]);
 
   const applyAndReport = (action: PlaybackAction) => {
-    if (!found) {
+    if (!found || streamViewer) {
       return;
     }
     if (snapshot.mode === 'site') {
       siteRef.current.applyPlayback(action);
+    } else if (snapshot.mode === 'stream') {
+      // Хост управляет своим файлом: пауза и seek меняют сам видеопоток.
+      localRef.current?.apply(action);
+      setLocalView((current) => ({
+        ...current,
+        playing:
+          action.kind === 'play' ? true : action.kind === 'pause' ? false : current.playing,
+        time: action.kind === 'seek' ? (action.t ?? current.time) : current.time,
+        rate: action.kind === 'rate' ? (action.rate ?? current.rate) : current.rate,
+      }));
     } else {
       localRef.current?.apply(action);
       setLocalView((current) => ({
@@ -1215,7 +1469,7 @@ export function RoomScreen({
 
   const syncToMe = () => {
     const client = clientRef.current;
-    if (!client) {
+    if (!client || streamViewer) {
       return;
     }
     client.takeover({
@@ -1313,6 +1567,24 @@ export function RoomScreen({
         />
       )}
 
+      {!pipActive && snapshot.mode === 'stream' && role === 'host' && (
+        <div className="hw-streambar" aria-live="polite">
+          <Icon name="broadcast" size={16} />
+          <span className="hw-streambar-text">
+            {streamStatusLine({
+              streaming: hostStreaming,
+              viewers: hostViewers,
+              error: streamError,
+            })}
+          </span>
+          <span className="hw-streambar-hint">
+            {hostStreaming
+              ? `${captureLabel(streamInfo?.capture ?? null)} · до ${STREAM_MAX_VIEWERS} зрителей`
+              : 'Выберите файл — зрители получат видео напрямую'}
+          </span>
+        </div>
+      )}
+
       {!pipActive && snapshot.mode === 'site' && (
         <TopBar
           status={site.status}
@@ -1348,15 +1620,40 @@ export function RoomScreen({
               </div>
             )}
           </main>
+        ) : snapshot.mode === 'stream' && streamViewer ? (
+          <RemoteStreamPlayer
+            ref={remoteRef}
+            stream={remoteStream}
+            fileName={streamFile ?? undefined}
+            started={streamStarted}
+            stopped={streamStopped}
+            error={streamError}
+            hostName={
+              snapshot.members.find((member) => member.userId === snapshot.hostUserId)?.name
+            }
+            onNotice={(text) => notifyRef.current(text)}
+            onVideoState={(state) => {
+              setRemotePlaying(state.playing);
+              setRemoteDimensions((current) =>
+                current.width === state.width && current.height === state.height
+                  ? current
+                  : { width: state.width, height: state.height },
+              );
+            }}
+          />
         ) : (
           <LocalPlayer
             ref={localRef}
             src={localFile?.url ?? null}
             fileName={localFile?.name ?? null}
+            variant={snapshot.mode === 'stream' ? 'stream' : 'local'}
+            streaming={hostStreaming}
+            viewers={hostViewers}
             onPick={pickFile}
             onMetadata={onMetadata}
             onProgress={onProgress}
             onUserAction={onLocalUserAction}
+            onPlayed={onPlayed}
             onNotice={(text) => notifyRef.current(text)}
           />
         )}
@@ -1434,6 +1731,7 @@ export function RoomScreen({
           onReload={site.reload}
           onSyncToMe={syncToMe}
           canSync={snapshot.phase === 'joined' && found}
+          viewOnly={streamViewer}
           driverLabel={driverName}
         />
       )}

@@ -130,7 +130,13 @@ export function RoomBar({
       </div>
 
       <div className="hw-roombar-meta">
-        <span className="hw-modechip">{mode === 'site' ? 'сайт' : 'локальный файл'}</span>
+        <span className="hw-modechip">
+          {mode === 'site'
+            ? 'сайт'
+            : mode === 'stream'
+              ? 'файл хоста'
+              : 'локальный файл'}
+        </span>
         <span className="hw-strategychip">
           {strategy || '…'}
           {live && peerCount === 0 ? ' · ждём второго' : ''}

@@ -167,14 +167,31 @@ export function HomeScreen({
             <button
               type="button"
               role="radio"
+              aria-checked={mode === 'stream'}
+              className={`hw-mode${mode === 'stream' ? ' is-active' : ''}`}
+              onClick={() => setMode('stream')}
+            >
+              <strong>Файл с моего телефона</strong>
+              <span>Хост выбирает видео и раздаёт его 1–2 зрителям по WebRTC. У зрителей нет файла — только просмотр.</span>
+            </button>
+            <button
+              type="button"
+              role="radio"
               aria-checked={mode === 'local'}
               className={`hw-mode${mode === 'local' ? ' is-active' : ''}`}
               onClick={() => setMode('local')}
             >
-              <strong>Свой файл</strong>
-              <span>У каждого телефона свой файл. Синхронизируется только таймкод — размеры могут отличаться.</span>
+              <strong>Свой файл у каждого</strong>
+              <span>У каждого телефона свой файл. Синхронизируется только таймкод — размеры и кодеки могут отличаться.</span>
             </button>
           </div>
+          {mode === 'stream' ? (
+            <p className="hw-note">
+              Раздача идёт напрямую с вашего телефона: канал мобильного хоста
+              ограничивает комнату двумя зрителями, а нагрев и расход батареи
+              выше. MKV может не воспроизводиться — приоритет у MP4 и WebM.
+            </p>
+          ) : null}
           <button
             type="button"
             className="hw-primary"
@@ -234,7 +251,11 @@ export function HomeScreen({
                   >
                     <span className="hw-recent-code">{room.code}</span>
                     <span className="hw-recent-mode">
-                      {room.mode === 'site' ? 'сайт' : 'файл'}
+                      {room.mode === 'site'
+                        ? 'сайт'
+                        : room.mode === 'stream'
+                          ? 'раздача'
+                          : 'файл'}
                     </span>
                     <span className="hw-recent-time">{relativeTime(room.lastJoinAt)}</span>
                   </button>
@@ -248,7 +269,7 @@ export function HomeScreen({
           <span className="hw-dot is-live" />
           <span>
             P2P без своих серверов: сигналинг — публичные релеи, медиа и данные
-            идут напрямую. Голос, чат и PiP появятся на следующих этапах.
+            идут напрямую. Голос, чат, PiP и раздача файла хоста уже в этой сборке.
           </span>
         </footer>
       </div>

@@ -7,6 +7,7 @@ import {
   type JoinData,
   type ProfilePayload,
   type PlaybackSample,
+  type RoomMode,
 } from './protocol';
 import { createIdentity, signEnvelope } from './identity';
 import { RoomClient, type RoomEvent } from './room';
@@ -21,12 +22,17 @@ class FakeChannel implements Channel {
   onPeerLeave: ((peerId: string) => void) | null = null;
   onMessage: ((data: unknown, peerId: string) => void) | null = null;
   onBlobMessage: ((data: unknown, peerId: string) => void) | null = null;
-  onPeerStream: ((stream: MediaStream, peerId: string) => void) | null = null;
+  onPeerStream:
+    | ((stream: MediaStream, peerId: string, metadata?: unknown) => void)
+    | null = null;
   readonly peers = new Map<string, FakeChannel>();
   readonly received: unknown[] = [];
   readonly receivedBlobs: unknown[] = [];
   /** Записи вызовов голосового API: проверяем replaceTrack без renegotiation. */
   readonly streamCalls: string[] = [];
+  /** Записи видеопотока: addScreenStream/removeScreenStream (этап 5). */
+  readonly screenStreams: MediaStream[] = [];
+  readonly removedScreenStreams: MediaStream[] = [];
   micTrack: MediaStreamTrack | null = null;
   mutedCalls: boolean[] = [];
 
@@ -55,6 +61,14 @@ class FakeChannel implements Channel {
   addStream(stream: MediaStream): void {
     this.micTrack = stream.getAudioTracks?.()[0] ?? null;
     this.streamCalls.push('addStream');
+  }
+
+  addScreenStream(stream: MediaStream): void {
+    this.screenStreams.push(stream);
+  }
+
+  removeScreenStream(stream: MediaStream): void {
+    this.removedScreenStreams.push(stream);
   }
 
   setMicMuted(track: MediaStreamTrack, muted: boolean): void {
@@ -100,7 +114,10 @@ async function settle(...clients: RoomClient[]): Promise<void> {
   await Promise.all(clients.map((client) => client.whenIdle()));
 }
 
-async function createPair(): Promise<{
+async function createPair(
+  mode: RoomMode = 'site',
+  beforeSettle?: (hostChannel: FakeChannel, guestChannel: FakeChannel) => void,
+): Promise<{
   host: RoomClient;
   guest: RoomClient;
   hostChannel: FakeChannel;
@@ -119,17 +136,18 @@ async function createPair(): Promise<{
   const host = new RoomClient({
     code,
     role: 'host',
-    mode: 'site',
+    mode,
     identity: hostIdentity,
     profile: profile('Хост'),
     connect: async () => hostChannel,
     onEvent: (event) => hostEvents.push(event),
-    initialUrl: 'https://example.com/',
+    initialUrl: mode === 'site' ? 'https://example.com/' : undefined,
     autoTimers: false,
   });
   const guest = new RoomClient({
     code,
     role: 'guest',
+    // Гость не знает режим до welcome: начальный режим перезапишет хост.
     mode: 'site',
     identity: guestIdentity,
     profile: profile('Гость'),
@@ -141,6 +159,7 @@ async function createPair(): Promise<{
   await host.start();
   await guest.start();
   hostChannel.link(guestChannel);
+  beforeSettle?.(hostChannel, guestChannel);
   await settle(host, guest);
   return { host, guest, hostChannel, guestChannel, hostEvents, guestEvents };
 }
@@ -388,6 +407,114 @@ describe('RoomClient: чат, реакции, «печатает…»', () => {
     } else {
       throw new Error('typing не дошёл');
     }
+  });
+});
+
+describe('RoomClient: стрим файла хоста (этап 5)', () => {
+  function fakeScreenStream(): MediaStream {
+    return {
+      getVideoTracks: () => [{}],
+      getAudioTracks: () => [],
+      getTracks: () => [],
+    } as unknown as MediaStream;
+  }
+
+  it('хост в режиме stream объявляет лимит 3 и принимает только двух зрителей', async () => {
+    const code = generateRoomCode(new Uint8Array([5, 5, 5, 5, 5, 5]));
+    const hostIdentity = await createIdentity();
+    const hostChannel = new FakeChannel('peer-host');
+    const host = new RoomClient({
+      code,
+      role: 'host',
+      mode: 'stream',
+      identity: hostIdentity,
+      profile: profile('Хост'),
+      connect: async () => hostChannel,
+      onEvent: () => undefined,
+      autoTimers: false,
+    });
+    await host.start();
+
+    const guests: RoomClient[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const identity = await createIdentity();
+      const channel = new FakeChannel(`peer-guest-${index}`);
+      const guest = new RoomClient({
+        code,
+        role: 'guest',
+        mode: 'site',
+        identity,
+        profile: profile(`Гость ${index}`),
+        connect: async () => channel,
+        onEvent: () => undefined,
+        autoTimers: false,
+      });
+      await guest.start();
+      hostChannel.link(channel);
+      guests.push(guest);
+    }
+    await settle(host, ...guests);
+
+    expect(host.memberList).toHaveLength(3);
+    expect(guests[0]?.phase).toBe('joined');
+    expect(guests[1]?.phase).toBe('joined');
+    expect(guests[2]?.phase).toBe('error');
+  });
+
+  it('stream-start/stream-stop доходят зрителю и состояние ведёт хост', async () => {
+    const { host, guest, guestEvents } = await createPair('stream');
+    expect(guest.playback.src.mode).toBe('stream');
+
+    host.publishStreamStart({
+      fileName: 'movie.mp4',
+      duration: 120,
+      maxViewers: 2,
+      capture: 'direct',
+    });
+    await settle(host, guest);
+    const start = guestEvents.find((event) => event.type === 'stream-start');
+    expect(start).toBeDefined();
+    if (start?.type === 'stream-start') {
+      expect(start.info.fileName).toBe('movie.mp4');
+      expect(start.info.maxViewers).toBe(2);
+    }
+    expect(host.streaming).toBe(true);
+
+    // Зритель не может перехватить управление: play/pause публикует только хост.
+    guest.publishAction({ kind: 'play' }, SAMPLE);
+    await settle(host, guest);
+    expect(host.playback.by).toBe(host.selfUserId);
+
+    host.publishStreamStop('host-stop');
+    await settle(host, guest);
+    expect(host.streaming).toBe(false);
+    expect(guestEvents.some((event) => event.type === 'stream-stop')).toBe(true);
+  });
+
+  it('видеопоток хоста приходит отдельным screen-stream, а не голосом', async () => {
+    const { host, guest, hostChannel, guestChannel, guestEvents } = await createPair('stream');
+    guestChannel.onPeerStream?.(fakeScreenStream(), hostChannel.selfId, { kind: 'screen' });
+    await settle(guest);
+    expect(guestEvents.some((event) => event.type === 'screen-stream')).toBe(true);
+    expect(guestEvents.some((event) => event.type === 'voice-stream')).toBe(false);
+    expect(host.phase).toBe('joined');
+  });
+
+  it('видеопоток, пришедший раньше welcome, не теряется', async () => {
+    const { guestEvents } = await createPair('stream', (hostChannel, guestChannel) => {
+      guestChannel.onPeerStream?.(fakeScreenStream(), hostChannel.selfId, { kind: 'screen' });
+    });
+    expect(guestEvents.some((event) => event.type === 'screen-stream')).toBe(true);
+  });
+
+  it('attachScreen/detachScreen передают поток в транспорт и снимают его', async () => {
+    const { host, hostChannel } = await createPair('stream');
+    const stream = fakeScreenStream();
+    host.attachScreen(stream);
+    expect(hostChannel.screenStreams).toContain(stream);
+
+    host.detachScreen();
+    expect(hostChannel.removedScreenStreams).toContain(stream);
   });
 });
 

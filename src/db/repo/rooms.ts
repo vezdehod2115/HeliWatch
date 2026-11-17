@@ -35,7 +35,12 @@ export async function listRecentRooms(limit = 5): Promise<RecentRoom[]> {
   return rows
     .map((row) => ({
       code: row.code,
-      mode: row.mode === 'local' ? ('local' as const) : ('site' as const),
+      mode:
+        row.mode === 'local'
+          ? ('local' as const)
+          : row.mode === 'stream'
+            ? ('stream' as const)
+            : ('site' as const),
       lastJoinAt: Number(row.last_join_at),
     }))
     .filter((row) => row.code.length > 0);

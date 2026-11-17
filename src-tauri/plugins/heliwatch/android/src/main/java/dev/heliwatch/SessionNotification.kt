@@ -49,7 +49,13 @@ object SessionNotification {
       .setSmallIcon(R.drawable.hw_ic_stat)
       .setContentTitle("HeliWatch · ${SessionState.code}")
       .setContentText(SessionState.notificationText())
-      .setSubText(if (SessionState.mode == "local") "Локальный файл" else "Сайт")
+      .setSubText(
+        when (SessionState.mode) {
+          "local" -> "Локальный файл"
+          "stream" -> "Файл хоста"
+          else -> "Сайт"
+        },
+      )
       .setContentIntent(contentIntent(context))
       .setOngoing(true)
       .setOnlyAlertOnce(true)

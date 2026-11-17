@@ -19,16 +19,27 @@ export interface LocalPlayerHandle {
   setVolume: (volume: number) => void;
   /** Размер кадра: пропорции окна PiP (этап 4). */
   dimensions: () => { width: number; height: number };
+  /** Сам элемент: из него StreamEngine берёт кадры для раздачи (этап 5). */
+  video: () => HTMLVideoElement | null;
 }
 
 interface LocalPlayerProps {
   src: string | null;
   fileName: string | null;
+  /**
+   * `local` — режим C, у каждого свой файл; `stream` — режим B, файл хоста
+   * раздаётся зрителям (этап 5).
+   */
+  variant?: 'local' | 'stream';
+  streaming?: boolean;
+  viewers?: number;
   onPick: (file: File) => void;
   onMetadata: (duration: number) => void;
   onProgress: (view: PlaybackView) => void;
   onUserAction: (action: PlaybackAction, sample: PlaybackSample) => void;
   onNotice: (text: string) => void;
+  /** Первый play: разблокировать звук захвата (AudioContext). */
+  onPlayed?: () => void;
 }
 
 const REMOTE_GUARD_MS = 800;
@@ -43,7 +54,19 @@ const PROGRESS_MS = 250;
  */
 export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
   function LocalPlayer(
-    { src, fileName, onPick, onMetadata, onProgress, onUserAction, onNotice },
+    {
+      src,
+      fileName,
+      variant = 'local',
+      streaming = false,
+      viewers = 0,
+      onPick,
+      onMetadata,
+      onProgress,
+      onUserAction,
+      onNotice,
+      onPlayed,
+    },
     ref,
   ) {
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -51,6 +74,7 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
     const suppressUntil = useRef(0);
     const pending = useRef<PlaybackAction[]>([]);
     const lastProgress = useRef(0);
+    const isStream = variant === 'stream';
 
     const currentSample = (): PlaybackSample => {
       const video = videoRef.current;
@@ -132,6 +156,7 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
             height: video?.videoHeight ?? 0,
           };
         },
+        video: () => videoRef.current,
       }),
       [],
     );
@@ -222,6 +247,7 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
               onLoadedMetadata={onLoadedMetadata}
               onTimeUpdate={() => handleProgress()}
               onPlay={() => {
+                onPlayed?.();
                 report({ kind: 'play' });
                 handleProgress(true);
               }}
@@ -237,6 +263,13 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
               onRateChange={() => {
                 const video = videoRef.current;
                 report({ kind: 'rate', rate: video?.playbackRate ?? 1 });
+              }}
+              onError={() => {
+                onNotice(
+                  isStream
+                    ? 'WebView не открыл этот файл. Для MKV перекодируйте в MP4 (H.264/AAC).'
+                    : 'Не удалось открыть файл: кодек не поддерживается',
+                );
               }}
               onEnded={() => {
                 const video = videoRef.current;
@@ -257,8 +290,13 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
               </button>
             )}
             <div className="hw-player-file">
-              <Icon name="video" size={14} />
+              <Icon name={isStream ? 'broadcast' : 'video'} size={14} />
               <span>{fileName}</span>
+              {isStream && streaming ? (
+                <span className="hw-livechip">
+                  эфир · {viewers}
+                </span>
+              ) : null}
               <button
                 type="button"
                 className="hw-linkbtn"
@@ -267,19 +305,20 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
                   inputRef.current?.click();
                 }}
               >
-                Сменить
+                {isStream ? 'Другой файл' : 'Сменить'}
               </button>
             </div>
           </>
         ) : (
           <div className="hw-player-empty">
             <div className="hw-player-empty-mark">
-              <Icon name="video" size={40} />
+              <Icon name={isStream ? 'broadcast' : 'video'} size={40} />
             </div>
-            <strong>Файл ещё не выбран</strong>
+            <strong>{isStream ? 'Файл для раздачи' : 'Файл ещё не выбран'}</strong>
             <p>
-              В режиме C у каждого свой файл: синхронизируется только время.
-              Размеры и кодеки могут отличаться.
+              {isStream
+                ? `Выберите видео — зрители (до 2) получат его напрямую с вашего телефона. Пауза и перемотка синхронны. MKV может не играть.`
+                : 'В режиме C у каждого свой файл: синхронизируется только время. Размеры и кодеки могут отличаться.'}
             </p>
             <button
               type="button"
@@ -289,7 +328,7 @@ export const LocalPlayer = forwardRef<LocalPlayerHandle, LocalPlayerProps>(
                 inputRef.current?.click();
               }}
             >
-              Выбрать видео
+              {isStream ? 'Выбрать файл для раздачи' : 'Выбрать видео'}
             </button>
           </div>
         )}
