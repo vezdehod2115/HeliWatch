@@ -34,14 +34,10 @@ class HeliWatchContainer(
 
   init {
     setBackgroundColor(Color.TRANSPARENT)
-    addView(
-      siteWebView,
-      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
-    )
-    addView(
-      tauriWebView,
-      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
-    )
+    // WebView'ы добавляет HeliWatchBridge.attach ПОСЛЕ removeView(tauriWebView):
+    // на момент load() Tauri-WebView уже лежит в content-контейнере Activity,
+    // и addView здесь падал бы с "The specified child already has a parent"
+    // (JNI abort при вызове из Rust_onCreate).
   }
 
   override fun dispatchTouchEvent(ev: MotionEvent): Boolean {

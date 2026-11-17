@@ -58,6 +58,12 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
 1. Wry/Tauri создаёт `RustWebView` и вызывает `setContentView(webView)`.
 2. Плагин получает WebView в `load(webView)`, создаёт `HeliWatchContainer` и
    переносит Tauri-WebView внутрь контейнера: сайт — снизу, React — сверху.
+   Важно: конструктор контейнера **не добавляет** WebView'ы. Сначала
+   `removeView(tauriWebView)` у старого родителя, затем `addView` сайта и
+   Tauri-WebView ровно по одному разу. Иначе `addView` бросает
+   `IllegalStateException: The specified child already has a parent`, а
+   исключение через JNI из `Rust_onCreate` превращается в `SIGABRT`
+   (`JNI GetJavaVM called with pending exception`).
 3. Контейнер перехватывает `dispatchTouchEvent`: на `ACTION_DOWN` выбирает цель
    по списку прямоугольников из React, фиксирует её на весь жест и отдаёт события
    нужному WebView напрямую. Верхний прозрачный WebView больше не «съедает» тапы.

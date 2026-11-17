@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Версия" src="https://img.shields.io/badge/version-0.2.2-6ff0c4?style=flat-square" />
+  <img alt="Версия" src="https://img.shields.io/badge/version-0.2.3-6ff0c4?style=flat-square" />
   <img alt="Лицензия MIT" src="https://img.shields.io/badge/license-MIT-6ff0c4?style=flat-square" />
   <img alt="Android 8+" src="https://img.shields.io/badge/Android-8.0%2B-3ddc84?style=flat-square" />
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2-24c8db?style=flat-square" />
@@ -27,10 +27,10 @@ HeliWatch — Android-приложение для совместного про�
 (WebRTC), сигналинг идёт через публичные релеи, профиль, ключи и настройки хранятся
 только на устройстве в SQLite.
 
-## Что уже работает в 0.2.2
+## Что уже работает в 0.2.3
 
-Версия 0.2.2 — это P2P-комнаты и синхронизация, 16-КБ выравнивание `.so` и
-диагностические логи запуска для Android 15/16. В APK уже есть:
+Версия 0.2.3 — это P2P-комнаты и синхронизация, 16-КБ выравнивание `.so` и
+исправленный контейнер двух WebView. В APK уже есть:
 
 - **Комната по коду или ссылке.** Код из 6 символов в Crockford base32 (без похожих
   букв), ссылка `heliwatch://r/<код>` открывает приложение сразу на вводе кода.
@@ -70,6 +70,19 @@ HeliWatch — Android-приложение для совместного про�
 Голос, чат, эмодзи и фото появятся на этапе 3; PiP и фон — на этапе 4; стрим
 файла с телефона хоста — на этапе 5; открытые комнаты и модерация — на этапе 6;
 друзья, DM, статистика и динамический акцент — на этапе 7. См. [PLAN.md](PLAN.md).
+
+## Исправлено в 0.2.3
+
+- **Вылет `SIGABRT` сразу после старта.** Конструктор `HeliWatchContainer`
+  добавлял Tauri-WebView себе, хотя тот ещё лежал в content-контейнере Activity.
+  `addView` бросал `IllegalStateException: The specified child already has a
+  parent`; исключение всплывало через JNI из `Rust_onCreate`, ART прерывал
+  процесс с `JNI GetJavaVM called with pending exception`. Теперь конструктор
+  контейнера не добавляет детей: `HeliWatchBridge.attach` сначала вызывает
+  `removeView(tauriWebView)`, затем добавляет сайт и React-WebView по одному
+  разу. Это была скрытая ошибка ещё с этапа 1.
+- `pnpm android:doctor` проверяет, что WebView не добавляются в конструкторе
+  контейнера, чтобы регрессия не вернулась.
 
 ## Диагностика запуска (0.2.2)
 
@@ -120,10 +133,10 @@ adb logcat -d -s RustStdoutStderr:V HeliWatch:V > heli-key.txt
 ## Скачать
 
 Готовые сборки лежат в [GitHub Releases](https://github.com/vezdehod2115/HeliWatch/releases).
-Для 0.2.2 — debug APK `heliwatch-0.2.2-debug.apk` (arm64-v8a):
+Для 0.2.3 — debug APK `heliwatch-0.2.3-debug.apk` (arm64-v8a):
 
 ```powershell
-adb install -r heliwatch-0.2.2-debug.apk
+adb install -r heliwatch-0.2.3-debug.apk
 ```
 
 Установка без ADB: скачайте APK на телефон и откройте файл; Android попросит
@@ -188,12 +201,12 @@ CLI (обычно `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`
 `versionCode`):
 
 ```powershell
-pnpm version:set 0.2.2
+pnpm version:set 0.2.3
 ```
 
 ## Ограничения и известные проблемы
 
-- **0.2.2 — только просмотр и синхронизация.** Голоса, чата, фото, эмодзи, PiP,
+- **0.2.3 — только просмотр и синхронизация.** Голоса, чата, фото, эмодзи, PiP,
   фонового сервиса и стрима файла хоста ещё нет; это этапы 3–5.
 - **Режим C синхронизирует только время.** Если файлы отличаются по длине или
   содержанию, картинка будет разной — это ожидаемо.

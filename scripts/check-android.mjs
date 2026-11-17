@@ -284,6 +284,11 @@ async function checkPlugin() {  const pluginRoot = path.join(root, 'src-tauri', 
     container?.includes('override fun dispatchTouchEvent') ?? false,
   );
   check('контейнер: slop 6dp', container?.includes('6f * resources.displayMetrics.density') ?? false);
+  check(
+    'контейнер: WebView добавляются в attach, а не в конструкторе',
+    !/init\s*\{[\s\S]*?addView\(\s*(siteWebView|tauriWebView)/.test(container ?? ''),
+    'иначе Tauri-WebView с родителем даёт JNI abort',
+  );
 }
 
 async function checkNativeAlignment() {
