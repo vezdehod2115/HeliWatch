@@ -1,6 +1,6 @@
 [package]
 name = "heliwatch"
-version = "0.8.1"
+version = "0.8.2"
 description = "HeliWatch — совместный просмотр видео с голосом и чатом (Android, Tauri v2)"
 authors = ["HeliWatch"]
 license = "MIT"

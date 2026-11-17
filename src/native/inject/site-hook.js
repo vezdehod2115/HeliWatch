@@ -226,7 +226,9 @@
       style.id = '__heliwatch_frame';
       style.textContent =
         'html.hw-pip,html.hw-pip body,html.hw-framed body{background:transparent !important;overflow:hidden !important;}' +
-        'html.hw-framed{background:radial-gradient(120% 70% at 50% 0%, #0d3a34, #041615 72%) !important;overflow:hidden !important;}' +
+        // Тот же цвет, что у .hw-room-backdrop: углы закруглённого видео не
+        // должны отличаться от зелёного фона комнаты.
+        'html.hw-framed{background:#06201d !important;overflow:hidden !important;}' +
         'html.hw-framed body > *{visibility:hidden !important;}' +
         'html.hw-framed body video,html.hw-pip body video{visibility:visible !important;position:fixed !important;' +
         'left:var(--hw-vx,0px) !important;top:var(--hw-vy,0px) !important;' +

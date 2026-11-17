@@ -77,7 +77,10 @@ export type NavAction =
   | 'reload'
   | 'stop'
   | 'back-capture-on'
-  | 'back-capture-off';
+  | 'back-capture-off'
+  /** Этап 8.2: сайт под строкой состояния в полноэкранном поиске. */
+  | 'browse-inset-on'
+  | 'browse-inset-off';
 
 export const EMPTY_STATUS: SiteStatus = {
   url: '',

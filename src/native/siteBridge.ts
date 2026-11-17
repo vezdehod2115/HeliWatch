@@ -48,6 +48,14 @@ export async function setSiteVolume(volume: number): Promise<void> {
   await callPlugin('site_cmd', { cmd: { cmd: 'setVolume', volume } });
 }
 
+/**
+ * Режим поиска: сдвинуть сайт под строку состояния, чтобы шапка сайта
+ * (поиск YouTube/Google) не пряталась за часами и батареей.
+ */
+export async function setBrowseInset(on: boolean): Promise<void> {
+  await navigateSite(on ? 'browse-inset-on' : 'browse-inset-off');
+}
+
 /** Прямоугольники React-слоя для роутинга касаний. */
 export async function sendTapRegions(payload: RegionPayload): Promise<void> {
   await callPlugin('site_regions', { payload });

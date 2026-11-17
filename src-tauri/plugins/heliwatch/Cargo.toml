@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-heliwatch"
-version = "0.8.1"
+version = "0.8.2"
 description = "HeliWatch: нативный Android-контейнер с двумя WebView"
 authors = ["HeliWatch"]
 license = "MIT"

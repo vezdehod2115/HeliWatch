@@ -3709,6 +3709,20 @@
   animation: none;
 }
 
+/* ---------- Непрозрачный фон комнаты (этап 8.2) ---------- */
+
+.hw-room-backdrop {
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  background: #06201d;
+}
+
+.hw-room-backdrop.is-full {
+  inset: 0;
+  background: radial-gradient(120% 70% at 50% 0%, #0d3a34 0%, #041615 72%);
+}
+
 /* ---------- Поиск на весь экран ---------- */
 
 /*
@@ -3717,11 +3731,18 @@
  * на шапку Google. Искать нужно на самом сайте, назад вернут кнопка и
  * системный back.
  */
-.hw-browse-fab {
+.hw-browse-actions {
   position: absolute;
   left: calc(var(--hw-safe-left) + 10px);
   bottom: calc(var(--hw-safe-bottom) + 14px);
   z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.hw-browse-fab {
   display: inline-flex;
   align-items: center;
   gap: 6px;

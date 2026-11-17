@@ -115,6 +115,24 @@ class HeliWatchContainer(
     tauriWebView.visibility = if (on && !keepReact) View.GONE else View.VISIBLE
   }
 
+  /**
+   * Режим поиска: сайт целиком уезжает вниз под строку состояния, иначе шапка
+   * сайта (поиск YouTube/Google) оказывается под часами и батареей.
+   *
+   * Сдвигаем именно WebView, а не padding: у страницы меняется viewport, и
+   * fixed-шапки сайтов остаются видимыми. При выходе из поиска возвращаем 0 —
+   * окно видео снова считается в полноэкранных координатах.
+   */
+  fun setSiteInsetTop(topPx: Int) {
+    val params = siteWebView.layoutParams as? FrameLayout.LayoutParams ?: return
+    val next = topPx.coerceAtLeast(0)
+    if (params.topMargin == next) {
+      return
+    }
+    params.topMargin = next
+    siteWebView.layoutParams = params
+  }
+
   fun showFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {
     if (fullscreenView != null) {
       fullscreenCallback?.onCustomViewHidden()

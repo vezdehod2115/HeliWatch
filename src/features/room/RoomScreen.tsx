@@ -3,6 +3,7 @@ import { BottomBar } from '../site/BottomBar';
 import { TopBar } from '../site/TopBar';
 import { RoomBar } from './RoomBar';
 import { VideoWindow, type VideoWindowRect } from './VideoWindow';
+import { RoomBackdrop } from './RoomBackdrop';
 import { RoomQueue } from './RoomQueue';
 import { BrowseOverlay } from './BrowseOverlay';
 import { LocalPlayer, type LocalPlayerHandle } from '../localplay/LocalPlayer';
@@ -99,6 +100,7 @@ import {
 } from '../pip/pipState';
 import { enterPip, readSessionInfo, updatePipState } from '../../native/pip';
 import { setRegionSyncPaused } from '../../native/regions';
+import { setBrowseInset } from '../../native/siteBridge';
 import {
   setKeepScreenOn,
   startSession,
@@ -212,6 +214,8 @@ export function RoomScreen({
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [queueIndex, setQueueIndex] = useState(0);
   const [queueOpen, setQueueOpen] = useState(false);
+  /** Прямоугольник окна в координатах экрана: по нему вырезаем фон. */
+  const [windowRect, setWindowRect] = useState<VideoWindowRect | null>(null);
 
   const clientRef = useRef<RoomClient | null>(null);
   const siteRef = useRef(site);
@@ -1536,6 +1540,8 @@ export function RoomScreen({
               roomUrlRef.current = urlRef.current;
               browseRef.current = false;
               setBrowse(false);
+              setWindowRect(null);
+              void setBrowseInset(false);
               lastWindowSig.current = '';
               // Возвращаемся в комнату — чат снова открыт под видео.
               useChatStore.getState().setOpen(true);
@@ -2191,6 +2197,8 @@ export function RoomScreen({
     roomUrlRef.current = item.url;
     browseRef.current = false;
     setBrowse(false);
+    setWindowRect(null);
+    void setBrowseInset(false);
     setQueueOpen(false);
     lastWindowSig.current = '';
     void siteRef.current.openUrl(item.url).then(() => {
@@ -2236,6 +2244,15 @@ export function RoomScreen({
     publishQueueState([], 0);
   };
 
+  /** Быстрый YouTube из режима поиска: остаёмся в поиске, но открываем сайт. */
+  const openYoutubeBrowse = (): void => {
+    if (!selfHost) {
+      notifyRef.current('Ссылку выбирает хост комнаты');
+      return;
+    }
+    void siteRef.current.openUrl(YOUTUBE_URL);
+  };
+
   /** Тап по окну без видео: меню комнаты скрываются, открывается поиск. */
   const enterBrowse = (): void => {
     if (modeRef.current !== 'site') {
@@ -2256,11 +2273,15 @@ export function RoomScreen({
     setModerationOpen(false);
     setViewerImageId(null);
     setReactionsOpen(false);
+    setWindowRect(null);
     const chatState = useChatStore.getState();
     chatState.setOpen(false);
     chatState.setEmojiOpen(false);
     lastWindowSig.current = '';
     void sendSiteCommand({ cmd: 'setWindow', on: false });
+    // Сайт под строкой состояния: поиск YouTube/Google не должен прятаться
+    // за часами и батареей.
+    void setBrowseInset(true);
     if (!/^https:\/\/(www\.)?google\./i.test(urlRef.current)) {
       void siteRef.current.openUrl(GOOGLE_URL);
     }
@@ -2274,6 +2295,10 @@ export function RoomScreen({
     }
     browseRef.current = false;
     setBrowse(false);
+    setWindowRect(null);
+    // Снимаем сдвиг сайта: окно видео снова считается в полноэкранных
+    // координатах, кадр переставим после возврата layout (эффект ниже).
+    void setBrowseInset(false);
     if (returnTimer.current !== null) {
       window.clearTimeout(returnTimer.current);
       returnTimer.current = null;
@@ -2292,6 +2317,7 @@ export function RoomScreen({
     if (modeRef.current !== 'site' || browseRef.current) {
       return;
     }
+    setWindowRect(rect);
     const x = Math.round(rect.x);
     const y = Math.round(rect.y);
     const w = Math.round(rect.w);
@@ -2347,6 +2373,23 @@ export function RoomScreen({
     }
   }, [browse, snapshot.mode]);
 
+  // Возврат из поиска: сайт уже без сдвига под строку состояния — возвращаем
+  // рамку окна. Небольшая задержка нужна, чтобы нативный layout успел сняться.
+  useEffect(() => {
+    if (browse || snapshot.mode !== 'site') {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const rect = lastRectRef.current;
+      if (!rect || browseRef.current) {
+        return;
+      }
+      lastWindowSig.current = '';
+      handleWindowRect(rect);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [browse, snapshot.mode, handleWindowRect]);
+
   // Новая страница (навигация) теряет frame-класс: ставим окно заново.
   useEffect(() => {
     if (browse || snapshot.mode !== 'site') {
@@ -2390,6 +2433,7 @@ export function RoomScreen({
         window.clearTimeout(controlsTimer.current);
       }
       void sendSiteCommand({ cmd: 'setWindow', on: false });
+      void setBrowseInset(false);
     },
     [],
   );
@@ -2413,6 +2457,12 @@ export function RoomScreen({
         pipActive ? ' hw-app--pip' : ''
       }${browse ? ' hw-app--browsing' : ''}`}
     >
+      {/* Закрываем сайт зелёным фоном: прозрачным остаётся только окно видео.
+          В поиске сайт показывается целиком, поэтому фон не рендерим. */}
+      {snapshot.mode === 'site' && !pipActive && !browse && (
+        <RoomBackdrop hole={siteVideo.found ? windowRect : null} />
+      )}
+
       {!pipActive && !browse && (
         <RoomBar
           code={code}
@@ -2691,7 +2741,9 @@ export function RoomScreen({
         />
       )}
 
-      {!pipActive && browse && <BrowseOverlay onBack={() => exitBrowse(true)} />}
+      {!pipActive && browse && (
+        <BrowseOverlay onBack={() => exitBrowse(true)} onYoutube={openYoutubeBrowse} />
+      )}
 
       {!pipActive && (
         <RoomQueue

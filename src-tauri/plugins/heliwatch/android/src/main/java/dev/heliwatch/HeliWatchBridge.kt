@@ -206,6 +206,15 @@ object HeliWatchBridge {
       backCaptured = false
       return
     }
+    // Поиск: сайт под строкой состояния, иначе поисковая строка сайта скрыта.
+    if (action == "browse-inset-on") {
+      setSiteInset(true)
+      return
+    }
+    if (action == "browse-inset-off") {
+      setSiteInset(false)
+      return
+    }
     val site = siteRef ?: return
     when (action) {
       "back" -> if (site.canGoBack()) site.goBack()
@@ -214,6 +223,27 @@ object HeliWatchBridge {
       "stop" -> site.stopLoading()
       else -> Log.w(TAG, "navigate: неизвестное действие $action")
     }
+  }
+
+  /** Сдвиг сайта под строку состояния в режиме полноэкранного поиска. */
+  fun setSiteInset(top: Boolean) {
+    val container = containerRef ?: return
+    container.setSiteInsetTop(if (top) statusBarHeight() else 0)
+  }
+
+  private fun statusBarHeight(): Int {
+    val activity = activityRef?.get() ?: return 0
+    val resId = activity.resources.getIdentifier("status_bar_height", "dimen", "android")
+    if (resId > 0) {
+      val height = runCatching { activity.resources.getDimensionPixelSize(resId) }
+        .getOrDefault(0)
+      if (height > 0) {
+        return height
+      }
+    }
+    val insets = activity.window?.decorView?.rootWindowInsets ?: return 0
+    @Suppress("DEPRECATION")
+    return insets.systemWindowInsetTop
   }
 
   fun runPageCommand(cmd: JSObject?) {
@@ -461,6 +491,10 @@ object HeliWatchBridge {
     // маленьком окне не нужен и только нагружает композитор. В режимах файла
     // и эфира видео живёт в React — его прятать нельзя.
     containerRef?.setPipMode(inPip, keepReact = SessionState.mode != "site")
+    if (inPip) {
+      // PiP — полноэкранный кадр: сдвиг под строку состояния снимаем.
+      setSiteInset(false)
+    }
     setSitePipClass(inPip)
     if (inPip) {
       // PiP-окно живёт поверх других приложений: таймеры и видео не усыпляем.
@@ -520,6 +554,7 @@ object HeliWatchBridge {
     // PiP-окно, оно больше не показывает видео — выходим из него.
     pipRef?.exit()
     pipRef?.release()
+    setSiteInset(false)
     setKeepScreenOn(false)
     setSitePipClass(false)
     SessionState.reset()
