@@ -1,6 +1,7 @@
 package dev.heliwatch
 
 import android.app.Activity
+import android.util.Log
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
 import app.tauri.annotation.Command
@@ -23,7 +24,9 @@ class HeliWatchPlugin(
 ) : Plugin(hostActivity) {
 
   override fun load(webView: WebView) {
+    Log.i("HeliWatch", "plugin load: begin")
     HeliWatchBridge.attach(hostActivity, webView, this)
+    Log.i("HeliWatch", "plugin load: done")
   }
 
   override fun onPause(activity: AppCompatActivity) {

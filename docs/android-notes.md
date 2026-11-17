@@ -94,6 +94,24 @@ pnpm android:apk
 
 APK: `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`.
 
+## Диагностика запуска (0.2.2)
+
+Если приложение падает с `SIGABRT` сразу после сплэша, смотрите main-буфер, а не
+только `-b crash`:
+
+```powershell
+adb logcat -c
+adb shell am start -n dev.heliwatch.app.debug/dev.heliwatch.app.MainActivity
+adb logcat -d -s RustStdoutStderr:V HeliWatch:V > heli-key.txt
+```
+
+Тег `HeliWatch`: `onCreate: begin` → `after super` → `MainActivity install` →
+`plugin load` → `attach: container ready`.
+Тег `RustStdoutStderr`: `Rust run() start` → `plugin setup: probe-before-sql` →
+`probe-after-sql` → `app setup reached` → `PANIC`/`RUN ERROR`.
+
+Последняя достигнутая строка указывает слой: Kotlin, Rust-плагин, WebView или JS.
+
 ## Android 15/16 и 16-КБ страницы памяти
 
 На устройствах с 16-КБ страницами (Android 15+ на части Pixel и других)

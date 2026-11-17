@@ -52,10 +52,12 @@ object HeliWatchBridge {
 
   /** Вызывается из MainActivity.onCreate: back-навигация и лаунчеры. */
   fun install(activity: AppCompatActivity) {
+    Log.i(TAG, "install: begin")
     activityRef = WeakReference(activity)
     setupFileChooser(activity)
     setupBackHandling(activity)
     handleIntent(activity.intent)
+    Log.i(TAG, "install: done")
   }
 
   /**
@@ -78,6 +80,7 @@ object HeliWatchBridge {
 
   /** Вызывается из HeliWatchPlugin.load: Tauri-WebView уже на экране. */
   fun attach(activity: Activity, tauriWebView: WebView, plugin: HeliWatchPlugin) {
+    Log.i(TAG, "attach: begin")
     pluginRef = plugin
     val host = activity as? AppCompatActivity ?: run {
       Log.w(TAG, "attach: activity не AppCompatActivity")
@@ -136,6 +139,7 @@ object HeliWatchBridge {
       injectHook(site)
     }
     flushPending()
+    Log.i(TAG, "attach: container ready")
   }
 
   fun setHookSource(source: String) {

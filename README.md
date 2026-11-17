@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Версия" src="https://img.shields.io/badge/version-0.2.1-6ff0c4?style=flat-square" />
+  <img alt="Версия" src="https://img.shields.io/badge/version-0.2.2-6ff0c4?style=flat-square" />
   <img alt="Лицензия MIT" src="https://img.shields.io/badge/license-MIT-6ff0c4?style=flat-square" />
   <img alt="Android 8+" src="https://img.shields.io/badge/Android-8.0%2B-3ddc84?style=flat-square" />
   <img alt="Tauri v2" src="https://img.shields.io/badge/Tauri-v2-24c8db?style=flat-square" />
@@ -27,10 +27,10 @@ HeliWatch — Android-приложение для совместного про�
 (WebRTC), сигналинг идёт через публичные релеи, профиль, ключи и настройки хранятся
 только на устройстве в SQLite.
 
-## Что уже работает в 0.2.1
+## Что уже работает в 0.2.2
 
-Версия 0.2.1 — это P2P-комнаты и синхронизация, плюс исправление запуска на
-Android 15/16 с 16-КБ страницами памяти. В APK уже есть:
+Версия 0.2.2 — это P2P-комнаты и синхронизация, 16-КБ выравнивание `.so` и
+диагностические логи запуска для Android 15/16. В APK уже есть:
 
 - **Комната по коду или ссылке.** Код из 6 символов в Crockford base32 (без похожих
   букв), ссылка `heliwatch://r/<код>` открывает приложение сразу на вводе кода.
@@ -71,6 +71,24 @@ Android 15/16 с 16-КБ страницами памяти. В APK уже ест
 файла с телефона хоста — на этапе 5; открытые комнаты и модерация — на этапе 6;
 друзья, DM, статистика и динамический акцент — на этапе 7. См. [PLAN.md](PLAN.md).
 
+## Диагностика запуска (0.2.2)
+
+Если приложение всё ещё падает после зелёного фона, в 0.2.2 есть трассировка:
+
+- тег `HeliWatch` в logcat: `MainActivity.onCreate`, `HeliWatchBridge.install`,
+  `attach`, `HeliWatchPlugin.load`;
+- тег `RustStdoutStderr`: `Rust run() start`, setup плагинов до/после
+  `tauri-plugin-sql`, `app setup reached`, `PANIC`, `RUN ERROR`.
+
+Снять лог:
+
+```powershell
+adb logcat -c
+adb shell am start -n dev.heliwatch.app.debug/dev.heliwatch.app.MainActivity
+adb logcat -d > heli-full.txt
+adb logcat -d -s RustStdoutStderr:V HeliWatch:V > heli-key.txt
+```
+
 ## Исправлено в 0.2.1
 
 - **Вылет сразу после старта на Android 15/16 с 16-КБ страницами.** Нативная
@@ -102,10 +120,10 @@ Android 15/16 с 16-КБ страницами памяти. В APK уже ест
 ## Скачать
 
 Готовые сборки лежат в [GitHub Releases](https://github.com/vezdehod2115/HeliWatch/releases).
-Для 0.2.1 — debug APK `heliwatch-0.2.1-debug.apk` (arm64-v8a):
+Для 0.2.2 — debug APK `heliwatch-0.2.2-debug.apk` (arm64-v8a):
 
 ```powershell
-adb install -r heliwatch-0.2.1-debug.apk
+adb install -r heliwatch-0.2.2-debug.apk
 ```
 
 Установка без ADB: скачайте APK на телефон и откройте файл; Android попросит
@@ -170,12 +188,12 @@ CLI (обычно `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`
 `versionCode`):
 
 ```powershell
-pnpm version:set 0.2.1
+pnpm version:set 0.2.2
 ```
 
 ## Ограничения и известные проблемы
 
-- **0.2.1 — только просмотр и синхронизация.** Голоса, чата, фото, эмодзи, PiP,
+- **0.2.2 — только просмотр и синхронизация.** Голоса, чата, фото, эмодзи, PiP,
   фонового сервиса и стрима файла хоста ещё нет; это этапы 3–5.
 - **Режим C синхронизирует только время.** Если файлы отличаются по длине или
   содержанию, картинка будет разной — это ожидаемо.
