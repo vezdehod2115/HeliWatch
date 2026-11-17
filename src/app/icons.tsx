@@ -1,0 +1,121 @@
+export type IconName =
+  | 'back'
+  | 'forward'
+  | 'reload'
+  | 'play'
+  | 'pause'
+  | 'bug'
+  | 'chevron-down'
+  | 'chevron-up'
+  | 'video'
+  | 'link';
+
+interface IconProps {
+  name: IconName;
+  size?: number;
+}
+
+/** Небольшие line-иконки в стиле темы; без внешних библиотек. */
+export function Icon({ name, size = 20 }: IconProps) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+    focusable: false,
+  };
+
+  switch (name) {
+    case 'back':
+      return (
+        <svg {...common}>
+          <path d="M15 5 8 12l7 7" />
+        </svg>
+      );
+    case 'forward':
+      return (
+        <svg {...common}>
+          <path d="m9 5 7 7-7 7" />
+        </svg>
+      );
+    case 'reload':
+      return (
+        <svg {...common}>
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+          <path d="M20 4v4h-4" />
+        </svg>
+      );
+    case 'play':
+      return (
+        <svg {...common} fill="currentColor" stroke="none">
+          <path d="M8.2 4.6 19 12 8.2 19.4Z" />
+        </svg>
+      );
+    case 'pause':
+      return (
+        <svg {...common} strokeWidth={2.6}>
+          <path d="M9 5v14" />
+          <path d="M15 5v14" />
+        </svg>
+      );
+    case 'bug':
+      return (
+        <svg {...common}>
+          <rect x="8" y="8" width="8" height="11" rx="4" />
+          <path d="M12 8V5M8.5 11H4M16 11h4.5M8.5 15H4.5M15.5 15h4M9 19l-2 2M15 19l2 2" />
+        </svg>
+      );
+    case 'chevron-down':
+      return (
+        <svg {...common}>
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      );
+    case 'chevron-up':
+      return (
+        <svg {...common}>
+          <path d="m6 15 6-6 6 6" />
+        </svg>
+      );
+    case 'video':
+      return (
+        <svg {...common}>
+          <rect x="3" y="6" width="13" height="12" rx="2.5" />
+          <path d="m16 10 5-2.6v9.2L16 14Z" />
+        </svg>
+      );
+    case 'link':
+      return (
+        <svg {...common}>
+          <path d="M10 14a4 4 0 0 0 5.66 0l2.5-2.5a4 4 0 0 0-5.66-5.66l-1.4 1.4" />
+          <path d="M14 10a4 4 0 0 0-5.66 0L5.84 12.5a4 4 0 0 0 5.66 5.66l1.4-1.4" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+/** Логотип-знак (H-плеер) для React-панели. */
+export function BrandMark({ size = 28 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 512 512"
+      aria-hidden
+      focusable={false}
+      className="hw-brand-mark"
+    >
+      <rect width="512" height="512" rx="116" fill="#06201d" />
+      <rect x="104" y="142" width="66" height="228" rx="33" fill="#6ff0c4" />
+      <rect x="342" y="142" width="66" height="228" rx="33" fill="#6ff0c4" />
+      <path d="M214 184v144l122-72Z" fill="#6ff0c4" />
+    </svg>
+  );
+}

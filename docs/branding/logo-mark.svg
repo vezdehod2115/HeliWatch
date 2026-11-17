@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="HeliWatch — знак H-плеер">
+  <rect width="512" height="512" rx="116" fill="#06201D"/>
+  <rect x="104" y="142" width="66" height="228" rx="33" fill="#6FF0C4"/>
+  <rect x="342" y="142" width="66" height="228" rx="33" fill="#6FF0C4"/>
+  <path d="M214 184v144l122-72Z" fill="#6FF0C4"/>
+</svg>

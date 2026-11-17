@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="320" viewBox="0 0 1120 320" role="img" aria-label="HeliWatch">
+  <rect width="1120" height="320" rx="48" fill="#06201D"/>
+  <rect x="72" y="76" width="56" height="168" rx="28" fill="#6FF0C4"/>
+  <rect x="236" y="76" width="56" height="168" rx="28" fill="#6FF0C4"/>
+  <path d="M148 108v104l94-52Z" fill="#6FF0C4"/>
+  <text x="352" y="201" fill="#E9FFFA" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="126" font-weight="700" letter-spacing="-4">HeliWatch</text>
+</svg>

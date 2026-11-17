@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>HeliWatch — тестовая страница</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --site-bg: #10151c;
+        --site-bg-soft: #171e27;
+        --site-card: #1a2330;
+        --site-line: #2b3a4d;
+        --site-ink: #eef4ff;
+        --site-muted: #9fb1c7;
+        --site-accent: #7aa2ff;
+        --site-accent-ink: #081020;
+      }
+
+      body.light {
+        color-scheme: light;
+        --site-bg: #eef2f8;
+        --site-bg-soft: #e2e8f2;
+        --site-card: #ffffff;
+        --site-line: #c9d4e3;
+        --site-ink: #14202f;
+        --site-muted: #5b6d84;
+        --site-accent: #2f5ee8;
+        --site-accent-ink: #ffffff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--site-bg);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: var(--site-bg);
+        color: var(--site-ink);
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        font-size: 15px;
+        line-height: 1.45;
+        transition: background 200ms ease, color 200ms ease;
+      }
+
+      .page {
+        max-width: 680px;
+        margin: 0 auto;
+        /* Верхняя и нижняя панели React перекрывают края: контент начинаем ниже. */
+        padding: 170px 16px 200px;
+      }
+
+      .hero {
+        padding: 4px 2px 18px;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--site-line);
+        background: var(--site-bg-soft);
+        color: var(--site-accent);
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+
+      h1 {
+        margin: 12px 0 6px;
+        font-size: 26px;
+        line-height: 1.15;
+        letter-spacing: -0.02em;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+
+      p {
+        margin: 6px 0;
+        color: var(--site-muted);
+      }
+
+      .card {
+        margin-top: 14px;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--site-line);
+        background: var(--site-card);
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .row h2 {
+        margin-right: auto;
+      }
+
+      .small {
+        font-size: 12.5px;
+        color: var(--site-muted);
+      }
+
+      .tag {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--site-bg-soft);
+        color: var(--site-accent);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      video {
+        width: 100%;
+        margin-top: 12px;
+        border-radius: 12px;
+        background: #000;
+        display: block;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 8px;
+        margin: 12px 0;
+      }
+
+      .btn {
+        min-height: 46px;
+        padding: 0 14px;
+        border: 0;
+        border-radius: 12px;
+        background: var(--site-accent);
+        color: var(--site-accent-ink);
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      .btn:active {
+        transform: scale(0.98);
+      }
+
+      .btn.ghost {
+        background: transparent;
+        color: var(--site-ink);
+        border: 1px solid var(--site-line);
+      }
+
+      .btn.small {
+        min-height: 36px;
+        padding: 0 10px;
+        font-size: 12.5px;
+      }
+
+      input[type='text'],
+      input:not([type]) {
+        flex: 1;
+        min-width: 0;
+        min-height: 46px;
+        padding: 0 12px;
+        border-radius: 12px;
+        border: 1px solid var(--site-line);
+        background: var(--site-bg-soft);
+        color: var(--site-ink);
+        font: inherit;
+        outline: none;
+      }
+
+      input:focus {
+        border-color: var(--site-accent);
+        box-shadow: 0 0 0 3px rgb(122 162 255 / 0.18);
+      }
+
+      .note {
+        font-size: 12.5px;
+      }
+
+      .file {
+        display: block;
+        margin-top: 14px;
+        padding: 12px;
+        border: 1px dashed var(--site-line);
+        border-radius: 12px;
+        color: var(--site-muted);
+        font-size: 13px;
+      }
+
+      .file span {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--site-ink);
+        font-weight: 600;
+      }
+
+      .file input {
+        width: 100%;
+        font-size: 12.5px;
+      }
+
+      .list {
+        margin: 10px 0 0;
+        padding-left: 22px;
+        color: var(--site-muted);
+      }
+
+      .list li {
+        padding: 9px 0;
+        border-bottom: 1px solid var(--site-line);
+      }
+
+      .list li:nth-child(3n + 1) {
+        color: var(--site-ink);
+        font-weight: 600;
+      }
+
+      a {
+        color: var(--site-accent);
+        font-weight: 600;
+      }
+
+      .foot {
+        margin-top: 18px;
+        padding: 0 2px;
+        color: var(--site-muted);
+        font-size: 11.5px;
+      }
+
+      @media (orientation: landscape) and (max-height: 500px) {
+        .page {
+          padding: 120px 14px 150px;
+        }
+
+        h1 {
+          font-size: 21px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <span class="pill">SITE WEBVIEW · test-page.html</span>
+        <h1>Это сайт, а не React</h1>
+        <p>
+          Нижний слой приложения. Кнопки, поля, скролл и видео ниже — обычная
+          страница. Тап по ним обрабатывает этот WebView, тап по панелям сверху и
+          снизу — прозрачный React-слой.
+        </p>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <h2>Видео</h2>
+          <span class="tag" id="video-state">video: —</span>
+        </div>
+        <video id="clip" src="test-video.mp4" controls playsinline preload="metadata"></video>
+        <div class="row small" style="margin-top: 10px">
+          <span id="video-meta">0:00 / 0:00</span>
+          <button type="button" class="btn ghost small" id="video-toggle" style="margin-left: auto">
+            Play / Pause
+          </button>
+        </div>
+        <p class="note">
+          Кнопки в нижней панели HeliWatch («−10 с», play, «+10 с») должны
+          управлять именно этим видео через инжект.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Кнопки и поля</h2>
+        <div class="grid">
+          <button type="button" class="btn" id="counter">Нажатий: 0</button>
+          <button type="button" class="btn ghost" id="theme">Сменить фон сайта</button>
+          <button type="button" class="btn ghost" id="alert">Показать alert</button>
+        </div>
+
+        <form class="row" id="hello-form">
+          <input id="name" placeholder="Ваше имя (поле сайта)" autocomplete="off" />
+          <button type="submit" class="btn">OK</button>
+        </form>
+        <p class="note" id="hello">Клавиатура должна открыться, поле — остаться видимым.</p>
+
+        <label class="file">
+          <span>Выбор файла — системный пикер Android</span>
+          <input id="file" type="file" accept="image/*,video/*" />
+        </label>
+        <p class="note" id="file-name">Файл не выбран</p>
+      </section>
+
+      <section class="card">
+        <h2>Скролл</h2>
+        <p class="note">
+          Прокрутите вниз: страница скроллится, панели React остаются на месте.
+        </p>
+        <ol class="list" id="list"></ol>
+      </section>
+
+      <section class="card">
+        <h2>Навигация</h2>
+        <p>
+          <a href="https://m.youtube.com/" target="_self">Открыть YouTube</a>
+          в этом же WebView — проверка истории и кнопки «назад».
+        </p>
+      </section>
+
+      <footer class="foot">
+        Видео: MDN, CC0. Страница упакована в APK (assets) и работает без сети.
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var counter = 0;
+        var counterButton = document.getElementById('counter');
+        counterButton.addEventListener('click', function () {
+          counter += 1;
+          counterButton.textContent = 'Нажатий: ' + counter;
+        });
+
+        document.getElementById('alert').addEventListener('click', function () {
+          alert('Это alert сайта. React-панель его не перекрывает.');
+        });
+
+        document.getElementById('theme').addEventListener('click', function () {
+          document.body.classList.toggle('light');
+        });
+
+        document.getElementById('hello-form').addEventListener('submit', function (event) {
+          event.preventDefault();
+          var name = document.getElementById('name').value.trim();
+          document.getElementById('hello').textContent = name
+            ? 'Привет, ' + name + '! Поле сайта работает.'
+            : 'Введите имя — поле сайта работает.';
+        });
+
+        document.getElementById('file').addEventListener('change', function (event) {
+          var file = event.target.files && event.target.files[0];
+          document.getElementById('file-name').textContent = file
+            ? 'Выбран файл: ' + file.name + ' (' + Math.round(file.size / 1024) + ' КБ)'
+            : 'Файл не выбран';
+        });
+
+        var list = document.getElementById('list');
+        for (var i = 1; i <= 30; i += 1) {
+          var item = document.createElement('li');
+          item.textContent = 'Строка ' + i + ' — скролл внутри WebView сайта';
+          list.appendChild(item);
+        }
+
+        var video = document.getElementById('clip');
+        var meta = document.getElementById('video-meta');
+        var stateLabel = document.getElementById('video-state');
+
+        function formatTime(seconds) {
+          if (!isFinite(seconds) || seconds <= 0) {
+            return '0:00';
+          }
+          var total = Math.floor(seconds);
+          var minutes = Math.floor(total / 60);
+          var rest = total % 60;
+          return minutes + ':' + String(rest).padStart(2, '0');
+        }
+
+        function refresh() {
+          meta.textContent = formatTime(video.currentTime) + ' / ' + formatTime(video.duration);
+          stateLabel.textContent = 'video: ' + (video.paused ? 'pause' : 'play');
+        }
+
+        video.addEventListener('play', refresh);
+        video.addEventListener('pause', refresh);
+        video.addEventListener('timeupdate', refresh);
+        video.addEventListener('loadedmetadata', refresh);
+
+        document.getElementById('video-toggle').addEventListener('click', function () {
+          if (video.paused) {
+            video.play().catch(function () {});
+          } else {
+            video.pause();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

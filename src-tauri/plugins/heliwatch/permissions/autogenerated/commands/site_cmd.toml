@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-site-cmd"
+description = "Enables the site_cmd command without any pre-configured scope."
+commands.allow = ["site_cmd"]
+
+[[permission]]
+identifier = "deny-site-cmd"
+description = "Denies the site_cmd command without any pre-configured scope."
+commands.deny = ["site_cmd"]

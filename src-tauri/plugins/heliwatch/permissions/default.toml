@@ -1,0 +1,12 @@
+[default]
+description = "Базовые разрешения HeliWatch: управление сайтом, тач-роутинг и события"
+permissions = [
+    "allow-site-init",
+    "allow-site-load",
+    "allow-site-nav",
+    "allow-site-cmd",
+    "allow-site-regions",
+    "allow-site-info",
+    "allow-register-listener",
+    "allow-remove-listener",
+]

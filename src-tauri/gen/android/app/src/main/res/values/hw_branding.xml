@@ -1,0 +1,5 @@
+<resources>
+    <!-- Фон окна и адаптивной иконки HeliWatch. -->
+    <color name="hw_window_background">#06201D</color>
+    <color name="hw_icon_background">#06201D</color>
+</resources>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108dp" height="108dp" viewBox="0 0 512 512" role="img" aria-label="HeliWatch background">
+  <defs>
+    <radialGradient id="hw-bg" cx="30%" cy="18%" r="90%">
+      <stop offset="0%" stop-color="#0D3A33"/>
+      <stop offset="60%" stop-color="#06201D"/>
+      <stop offset="100%" stop-color="#041615"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#hw-bg)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#6FF0C4" stroke-opacity="0.10" stroke-width="2"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#6FF0C4" stroke-opacity="0.06" stroke-width="2"/>
+</svg>

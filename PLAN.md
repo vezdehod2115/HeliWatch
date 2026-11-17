@@ -24,7 +24,7 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 
 | № | Этап | Версия | Статус | Дата | Примечание |
 |---|---|---|---|---|---|
-| 1 | Каркас: Tauri/Android, два WebView, тач-роутинг, тема, лого, README, CHANGELOG | 0.1.0 | ⬜ не начат | — | — |
+| 1 | Каркас: Tauri/Android, два WebView, тач-роутинг, тема, лого, README, CHANGELOG | 0.1.0 | ✅ завершён | 17.11.2026 | debug APK собран; проверка на телефонах и скриншоты — по чеклисту из README |
 | 2 | P2P-комнаты, identity, синхронизация сайта и локальных файлов | 0.2.0 | ⬜ не начат | — | — |
 | 3 | Голос, чат комнаты, фото, эмодзи | 0.3.0 | ⬜ не начат | — | — |
 | 4 | Фон: PiP, foreground-сервис, таймеры WebView | 0.4.0 | ⬜ не начат | — | — |
@@ -41,15 +41,15 @@ HeliWatch — Android-приложение (Tauri v2, только APK) для �
 | UI | `react`, `react-dom` | 19.3.1 | `@types/react` 19.3 |
 | | `typescript` | 5.9.x | strict + `noUncheckedIndexedAccess` |
 | | `vite`, `@vitejs/plugin-react` | 8.1.x / из шаблона | Rolldown; точная версия плагина — по lockfile |
-| | `tailwindcss`, `@tailwindcss/vite` | 4.1.x | CSS-first `@theme`, без `tailwind.config.js` |
+| | `tailwindcss`, `@tailwindcss/vite` | 4.3.x | CSS-first `@theme`, без `tailwind.config.js`; 4.1.x не поддерживает Vite 8 |
 | | `zustand` | 5.1.x | |
 | P2P | `trystero` | **0.26.0 (pin)** | 0.27 — ломающий релиз (новая identity/API), см. §2.7 |
 | | `peerjs` | 1.5.x | только запасной транспорт |
 | Плагины | `@tauri-apps/plugin-sql` | 2.x | SQLite (sqlx), миграции — в Rust |
 | | `plugin-dialog`, `plugin-fs`, `plugin-os`, `plugin-process`, `plugin-opener` | 2.x | пикеры, файлы, устройство |
-| Android | Kotlin / AGP / Gradle / JDK | 2.2.x / из шаблона / 9.x / 21 | как в шаблоне Tauri 2.12, отдельно не апгрейдим |
+| Android | Kotlin / AGP / Gradle / JDK | 2.2.x / из шаблона / 9.x / 17+ | как в шаблоне Tauri 2.12, отдельно не апгрейдим |
 | | compileSdk / targetSdk / minSdk | 36 / 36 / 26 | minSdk 26: PiP + современный WebView |
-| Тесты | `vitest` | 3.x | протокол, чанкинг, цветокоррекция, seq |
+| Тесты | `vitest` | 5.x | протокол, чанкинг, цветокоррекция, seq; подключается с первыми тестами на этапе 2, 3.x несовместим с Vite 8 |
 | Инструменты | Node / pnpm | ≥22.12 / 10.x | |
 
 Правило: точные patch-версии фиксирует `pnpm-lock.yaml` / `Cargo.lock`. Менять версию можно только с записью в `CHANGELOG.md` и правкой этой таблицы.
