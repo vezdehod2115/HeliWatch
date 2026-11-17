@@ -16,6 +16,11 @@ export interface SiteNotice {
   at: number;
 }
 
+export interface DeepLink {
+  code: string;
+  at: number;
+}
+
 export interface SiteStatus {
   url: string;
   title: string;
@@ -27,6 +32,10 @@ export interface SiteStatus {
   fullscreen: boolean;
   lastTap: { target: TapTarget; x: number; y: number; at: number } | null;
   notice: SiteNotice | null;
+  /** Код из ссылки heliwatch://r/<code>, пришедшей в Activity. */
+  deepLink: DeepLink | null;
+  /** Счётчик системных «назад» на корне истории — Shell решает, что делать. */
+  backRootAt: number;
 }
 
 /** Событие из Kotlin: нативное (nav/tap/...) либо обёрнутое событие страницы. */
@@ -58,4 +67,6 @@ export const EMPTY_STATUS: SiteStatus = {
   fullscreen: false,
   lastTap: null,
   notice: null,
+  deepLink: null,
+  backRootAt: 0,
 };

@@ -165,6 +165,15 @@ async function checkMainActivity() {
     content.includes('// HW:PATCH:MAIN:BEGIN') && content.includes('// HW:PATCH:MAIN:END'),
   );
   check('вызов HeliWatchBridge.install(this)', content.includes('HeliWatchBridge.install(this)'));
+  check(
+    'маркеры HW:PATCH:INTENT',
+    content.includes('// HW:PATCH:INTENT:BEGIN') && content.includes('// HW:PATCH:INTENT:END'),
+  );
+  check(
+    'onNewIntent → HeliWatchBridge.handleIntent',
+    content.includes('override fun onNewIntent(') &&
+      content.includes('HeliWatchBridge.handleIntent(intent)'),
+  );
 }
 
 async function checkResources() {

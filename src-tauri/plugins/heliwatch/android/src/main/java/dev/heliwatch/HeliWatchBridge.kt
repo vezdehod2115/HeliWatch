@@ -45,6 +45,7 @@ object HeliWatchBridge {
   private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
   private var backCallback: OnBackPressedCallback? = null
   private var backArmedUntil = 0L
+  private val deepLinkPattern = Regex("""heliwatch://(?:r/)?([0-9A-Za-z]{6})""", RegexOption.IGNORE_CASE)
 
   private val mainHandler = Handler(Looper.getMainLooper())
   private val pendingEvents = ArrayDeque<JSObject>()
@@ -54,6 +55,25 @@ object HeliWatchBridge {
     activityRef = WeakReference(activity)
     setupFileChooser(activity)
     setupBackHandling(activity)
+    handleIntent(activity.intent)
+  }
+
+  /**
+   * Ссылка heliwatch://r/<code>. Intent приходит и при холодном старте
+   * (activity.intent), и при повторном открытии (MainActivity.onNewIntent).
+   */
+  fun handleIntent(intent: Intent?) {
+    val raw = intent?.dataString ?: return
+    if (!raw.startsWith("heliwatch://", ignoreCase = true)) {
+      return
+    }
+    val match = deepLinkPattern.find(raw) ?: return
+    val code = match.groupValues[1].uppercase()
+    emitEvent(JSObject().apply {
+      put("t", "deeplink")
+      put("code", code)
+      put("url", raw)
+    })
   }
 
   /** Вызывается из HeliWatchPlugin.load: Tauri-WebView уже на экране. */

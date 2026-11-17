@@ -230,9 +230,9 @@ async function patchMainActivity() {
     const block = `    // HW:PATCH:MAIN:BEGIN
     HeliWatchBridge.install(this)
     // HW:PATCH:MAIN:END`;
-    if (/\/\/ HW:PATCH:MAIN:BEGIN[\s\S]*?\/\/ HW:PATCH:MAIN:END/.test(next)) {
+    if (/^[ \t]*\/\/ HW:PATCH:MAIN:BEGIN[\s\S]*?\/\/ HW:PATCH:MAIN:END/m.test(next)) {
       next = next.replace(
-        /\/\/ HW:PATCH:MAIN:BEGIN[\s\S]*?\/\/ HW:PATCH:MAIN:END/,
+        /^[ \t]*\/\/ HW:PATCH:MAIN:BEGIN[\s\S]*?\/\/ HW:PATCH:MAIN:END/m,
         block,
       );
     } else {
@@ -243,6 +243,25 @@ async function patchMainActivity() {
     }
     if (!next.includes('HeliWatchBridge.install(this)')) {
       throw new Error('не удалось вставить HeliWatchBridge.install() в MainActivity.kt');
+    }
+
+    // Ссылка heliwatch://r/<code> при повторном открытии приходит в onNewIntent.
+    const intentBlock = `    // HW:PATCH:INTENT:BEGIN
+    override fun onNewIntent(intent: android.content.Intent) {
+      super.onNewIntent(intent)
+      HeliWatchBridge.handleIntent(intent)
+    }
+    // HW:PATCH:INTENT:END`;
+    if (/^[ \t]*\/\/ HW:PATCH:INTENT:BEGIN[\s\S]*?\/\/ HW:PATCH:INTENT:END/m.test(next)) {
+      next = next.replace(
+        /^[ \t]*\/\/ HW:PATCH:INTENT:BEGIN[\s\S]*?\/\/ HW:PATCH:INTENT:END/m,
+        intentBlock,
+      );
+    } else {
+      next = next.replace(/\n}\s*$/, `\n\n${intentBlock}\n}\n`);
+    }
+    if (!next.includes('HeliWatchBridge.handleIntent(intent)')) {
+      throw new Error('не удалось вставить onNewIntent() в MainActivity.kt');
     }
     return next;
   });

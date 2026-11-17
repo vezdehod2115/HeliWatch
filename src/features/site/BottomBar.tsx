@@ -1,47 +1,40 @@
-import type { SiteStatus } from './types';
 import { Icon } from '../../app/icons';
+import { formatTime, type PlaybackView } from '../../app/playback';
 
 interface BottomBarProps {
-  status: SiteStatus;
+  view: PlaybackView;
+  label: string;
+  mode: 'site' | 'local';
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onTogglePlay: () => void;
   onSeek: (seconds: number) => void;
-  onReload: () => void;
+  onRate: (rate: number) => void;
+  onReload?: () => void;
+  /** «Синхронизировать ко мне»: взять управление и разослать своё время. */
+  onSyncToMe: () => void;
+  canSync: boolean;
+  driverLabel?: string;
 }
 
-function formatTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return '0:00';
-  }
-  const total = Math.floor(seconds);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const rest = total % 60;
-  const ss = String(rest).padStart(2, '0');
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${ss}`;
-  }
-  return `${minutes}:${ss}`;
-}
+const RATES = [0.75, 1, 1.25, 1.5] as const;
 
-/** Нижняя панель: состояние видео страницы и тестовые команды через мост. */
+/** Нижняя панель: транспорт, скорость и синхронизация комнаты. */
 export function BottomBar({
-  status,
+  view,
+  label,
+  mode,
   collapsed,
   onToggleCollapsed,
   onTogglePlay,
   onSeek,
+  onRate,
   onReload,
+  onSyncToMe,
+  canSync,
+  driverLabel,
 }: BottomBarProps) {
-  const { video, hookReady } = status;
-  const label = !hookReady
-    ? 'Инжект не готов'
-    : video.found
-      ? video.playing
-        ? 'Играет'
-        : 'Пауза'
-      : 'Видео не найдено';
+  const { found, playing, time, duration, rate } = view;
 
   return (
     <footer
@@ -55,26 +48,27 @@ export function BottomBar({
           onClick={onToggleCollapsed}
           aria-label="Развернуть панель управления"
         >
-          <Icon name={video.playing ? 'pause' : 'play'} size={16} />
-          <span>{formatTime(video.time)}</span>
+          <Icon name={playing ? 'pause' : 'play'} size={16} />
+          <span>{formatTime(time)}</span>
           <Icon name="chevron-up" size={16} />
         </button>
       ) : (
         <>
           <div className="hw-videorow">
-            <span className={`hw-dot${video.playing ? ' is-live' : ''}`} />
-            <span className={`hw-video-label${video.playing ? ' is-live' : ''}`}>
-              {label}
-            </span>
-            {hookReady && (
-              <span className="hw-badge" title="page-hook внедрён">
-                hook
+            <span className={`hw-dot${playing ? ' is-live' : ''}`} />
+            <span className={`hw-video-label${playing ? ' is-live' : ''}`}>{label}</span>
+            {mode === 'site' && (
+              <span className="hw-badge" title="Режим «Сайт»">
+                сайт
+              </span>
+            )}
+            {mode === 'local' && (
+              <span className="hw-badge" title="Локальный файл">
+                файл
               </span>
             )}
             <span className="hw-time">
-              {video.found
-                ? `${formatTime(video.time)} / ${formatTime(video.duration)}`
-                : '—'}
+              {found ? `${formatTime(time)} / ${formatTime(duration)}` : '—'}
             </span>
             <button
               type="button"
@@ -91,7 +85,7 @@ export function BottomBar({
               type="button"
               className="hw-tbtn"
               onClick={() => onSeek(-10)}
-              disabled={!video.found}
+              disabled={!found}
               aria-label="Назад на 10 секунд"
             >
               −10 с
@@ -100,28 +94,55 @@ export function BottomBar({
               type="button"
               className="hw-play"
               onClick={onTogglePlay}
-              disabled={!video.found}
-              aria-label={video.playing ? 'Пауза' : 'Играть'}
+              disabled={!found}
+              aria-label={playing ? 'Пауза' : 'Играть'}
             >
-              <Icon name={video.playing ? 'pause' : 'play'} size={24} />
+              <Icon name={playing ? 'pause' : 'play'} size={24} />
             </button>
             <button
               type="button"
               className="hw-tbtn"
               onClick={() => onSeek(10)}
-              disabled={!video.found}
+              disabled={!found}
               aria-label="Вперёд на 10 секунд"
             >
               +10 с
             </button>
             <button
               type="button"
-              className="hw-tbtn hw-tbtn--icon"
-              onClick={onReload}
-              aria-label="Перезагрузить сайт"
+              className="hw-tbtn hw-tbtn--sync"
+              onClick={onSyncToMe}
+              disabled={!canSync}
+              aria-label="Синхронизировать всех ко мне"
             >
-              <Icon name="reload" size={18} />
+              Ко мне
             </button>
+            {mode === 'site' && onReload && (
+              <button
+                type="button"
+                className="hw-tbtn hw-tbtn--icon"
+                onClick={onReload}
+                aria-label="Перезагрузить сайт"
+              >
+                <Icon name="reload" size={18} />
+              </button>
+            )}
+          </div>
+
+          <div className="hw-raterow">
+            <span className="hw-rate-label">Скорость</span>
+            {RATES.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`hw-rate${Math.abs(rate - value) < 0.01 ? ' is-active' : ''}`}
+                onClick={() => onRate(value)}
+                disabled={!found}
+              >
+                {value}×
+              </button>
+            ))}
+            {driverLabel && <span className="hw-driver">{driverLabel}</span>}
           </div>
         </>
       )}

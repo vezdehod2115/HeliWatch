@@ -1,20 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BottomBar } from '../features/site/BottomBar';
+import { HomeScreen } from '../features/lobby/HomeScreen';
+import { RoomScreen } from '../features/room/RoomScreen';
 import { DebugZones } from '../features/site/DebugZones';
-import { TopBar } from '../features/site/TopBar';
 import { useSiteController } from '../features/site/useSiteController';
 import { startRegionSync, type RegionPayload } from '../native/regions';
+import {
+  touchRecentRoom,
+} from '../db/repo/rooms';
+import { generateRoomCode, type RoomMode, type RoomRole } from '../net/protocol';
+import { useProfileStore } from '../stores/profile';
+import { BrandMark } from './icons';
+
+type Screen =
+  | { name: 'home' }
+  | { name: 'room'; code: string; role: RoomRole; mode: RoomMode | null };
 
 const TOAST_MS = 3400;
 
-/** Каркас оверлея: две панели, прозрачная сцена и отладочные зоны. */
+/** Корень приложения: главная, комната, зоны касания и уведомления. */
 export function Shell() {
   const site = useSiteController();
+  const profileStatus = useProfileStore((state) => state.status);
+  const identity = useProfileStore((state) => state.identity);
+  const profile = useProfileStore((state) => state.profile);
+  const persisted = useProfileStore((state) => state.persisted);
+  const profileError = useProfileStore((state) => state.error);
+  const loadProfile = useProfileStore((state) => state.load);
+  const rename = useProfileStore((state) => state.rename);
+
+  const [screen, setScreen] = useState<Screen>({ name: 'home' });
   const [zonesOpen, setZonesOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const [regionPayload, setRegionPayload] = useState<RegionPayload | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [deepPrefill, setDeepPrefill] = useState<{ code: string; at: number } | null>(null);
   const toastTimer = useRef<number | null>(null);
+  const lastDeepAt = useRef(0);
+  const lastNoticeAt = useRef(0);
+  const backRootSeen = useRef(site.status.backRootAt);
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
 
   const notify = useCallback((text: string) => {
     setToast(text);
@@ -27,6 +51,10 @@ export function Shell() {
     }, TOAST_MS);
   }, []);
 
+  useEffect(() => {
+    void loadProfile();
+  }, [loadProfile]);
+
   useEffect(
     () => () => {
       if (toastTimer.current !== null) {
@@ -36,23 +64,54 @@ export function Shell() {
     [],
   );
 
-  // Каждое новое уведомление native-слоя показываем один раз.
+  // Нативные уведомления (ошибки страницы, инжект, back-root и т.п.).
   const notice = site.status.notice;
   useEffect(() => {
-    if (notice) {
+    if (!notice || notice.at === lastNoticeAt.current) {
+      return;
+    }
+    lastNoticeAt.current = notice.at;
+    if (screenRef.current.name === 'home') {
       notify(notice.text);
     }
   }, [notice, notify]);
 
-  // Отправка зон касания: restart по [zonesOpen, collapsed] даёт мгновенный
-  // пересчёт после анимаций панели, дальше работают observer'ы и heartbeat.
+  // Ссылка heliwatch://r/<code>: на главной подставляем код, в комнате игнорируем.
+  const deepLink = site.status.deepLink;
+  useEffect(() => {
+    if (!deepLink || deepLink.at === lastDeepAt.current) {
+      return;
+    }
+    lastDeepAt.current = deepLink.at;
+    if (screenRef.current.name === 'home') {
+      setDeepPrefill(deepLink);
+      notify(`Код из ссылки: ${deepLink.code}`);
+    } else {
+      notify('Ссылка получена, но вы уже в комнате');
+    }
+  }, [deepLink, notify]);
+
+  // Системный back: в комнате выходим, на главной снова показываем подсказку.
+  useEffect(() => {
+    if (site.status.backRootAt <= backRootSeen.current) {
+      return;
+    }
+    backRootSeen.current = site.status.backRootAt;
+    if (screenRef.current.name === 'home') {
+      notify('Ещё раз «назад» — выход из HeliWatch');
+    }
+  }, [site.status.backRootAt, notify]);
+
+  // Зоны касания: пересчёт при смене экрана и после анимаций панелей.
+  const screenKey =
+    screen.name === 'room' ? `room:${screen.code}:${screen.role}` : 'home';
   useEffect(
     () =>
       startRegionSync(
         () => zonesOpen,
         zonesOpen ? setRegionPayload : undefined,
       ),
-    [zonesOpen, collapsed],
+    [zonesOpen, screenKey],
   );
 
   useEffect(() => {
@@ -61,38 +120,89 @@ export function Shell() {
     }
   }, [zonesOpen]);
 
-  const open = (input: string) => {
-    void site.open(input);
-  };
+  const leaveRoom = useCallback(() => {
+    const current = screenRef.current;
+    if (current.name === 'room') {
+      notify(current.role === 'host' ? 'Комната закрыта' : 'Вы вышли из комнаты');
+    }
+    setScreen({ name: 'home' });
+  }, [notify]);
+
+  const createRoom = useCallback(
+    (mode: RoomMode) => {
+      const code = generateRoomCode();
+      void touchRecentRoom(code, mode).catch(() => undefined);
+      setScreen({ name: 'room', code, role: 'host', mode });
+    },
+    [],
+  );
+
+  const joinRoom = useCallback((code: string) => {
+    setScreen({ name: 'room', code, role: 'guest', mode: null });
+  }, []);
+
+  const openRecent = useCallback((code: string, mode: RoomMode) => {
+    setScreen({ name: 'room', code, role: 'guest', mode });
+  }, []);
+
+  const handleJoined = useCallback((code: string, mode: RoomMode) => {
+    void touchRecentRoom(code, mode).catch(() => undefined);
+  }, []);
+
+  if (profileStatus !== 'ready' || !identity || !profile) {
+    return (
+      <div className="hw-app">
+        <div className="hw-splash" data-hw-region="splash">
+          <BrandMark size={64} />
+          <h1>HeliWatch</h1>
+          {profileStatus === 'error' ? (
+            <>
+              <p className="hw-formerror">
+                {profileError ?? 'Не удалось подготовить профиль и ключи'}
+              </p>
+              <button type="button" className="hw-primary" onClick={() => void loadProfile()}>
+                Повторить
+              </button>
+            </>
+          ) : (
+            <p>Готовим ключи и локальную базу…</p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="hw-app">
-      <TopBar
-        status={site.status}
-        zonesOpen={zonesOpen}
-        onOpen={open}
-        onTestPage={() => void site.openTestPage()}
-        onYoutube={() => void site.openYoutube()}
-        onNav={site.nav}
-        onToggleZones={() => setZonesOpen((openState) => !openState)}
-      />
-
-      <main className="hw-stage" aria-hidden="true">
-        <div className="hw-hint">
-          Верхняя панель — <b>React</b>, остальное — сайт под ней.
-          <br />
-          Тапните по тестовой странице.
-        </div>
-      </main>
-
-      <BottomBar
-        status={site.status}
-        collapsed={collapsed}
-        onToggleCollapsed={() => setCollapsed((value) => !value)}
-        onTogglePlay={site.togglePlay}
-        onSeek={site.seekBy}
-        onReload={site.reload}
-      />
+      {screen.name === 'home' ? (
+        <HomeScreen
+          identity={identity}
+          profile={profile}
+          persisted={persisted}
+          initialCode={deepPrefill}
+          onCreate={createRoom}
+          onJoin={joinRoom}
+          onOpenRecent={openRecent}
+          onRename={rename}
+          onCodeConsumed={() => setDeepPrefill(null)}
+          notify={notify}
+        />
+      ) : (
+        <RoomScreen
+          key={`${screen.code}:${screen.role}`}
+          code={screen.code}
+          role={screen.role}
+          initialMode={screen.mode}
+          identity={identity}
+          profile={profile}
+          site={site}
+          zonesOpen={zonesOpen}
+          onToggleZones={() => setZonesOpen((value) => !value)}
+          onLeave={leaveRoom}
+          onJoined={handleJoined}
+          notify={notify}
+        />
+      )}
 
       {zonesOpen && (
         <DebugZones

@@ -1,3 +1,4 @@
+import { normalizeRoomCode } from '../../net/protocol';
 import type { SiteEvent, SiteStatus, VideoInfo } from './types';
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -62,8 +63,27 @@ function applyPageEvent(
           at: Date.now(),
         },
       };
-    default:
+    default: {
+      // page-hook присылает remote-play/pause/seek/setRate после применения
+      // команды из комнаты: это тоже снимок видео, обновляем состояние.
+      if (event.startsWith('remote-') && 'time' in data) {
+        const count = num(data.count, state.video.count);
+        const duration = num(data.duration, state.video.duration);
+        return {
+          ...state,
+          video: {
+            found: count > 0,
+            count,
+            playing: bool(data.playing, state.video.playing),
+            time: clampTime(num(data.time, state.video.time), duration),
+            duration,
+            rate: num(data.rate, state.video.rate),
+            muted: bool(data.muted, state.video.muted),
+          },
+        };
+      }
       return state;
+    }
   }
 }
 
@@ -102,13 +122,14 @@ export function applySiteEvent(state: SiteStatus, event: SiteEvent): SiteStatus 
       };
     case 'fullscreen':
       return { ...state, fullscreen: bool(event.on, false) };
+    case 'deeplink': {
+      const code = normalizeRoomCode(str(event.code));
+      return code ? { ...state, deepLink: { code, at: Date.now() } } : state;
+    }
     case 'back-root':
       return {
         ...state,
-        notice: {
-          text: 'Ещё раз «назад» — выход из HeliWatch',
-          at: Date.now(),
-        },
+        backRootAt: state.backRootAt + 1,
       };
     case 'error':
       return {

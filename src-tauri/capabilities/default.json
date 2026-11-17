@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Права главного окна HeliWatch",
   "windows": ["main"],
-  "permissions": ["core:default", "log:default", "heliwatch:default"]
+  "permissions": [
+    "core:default",
+    "log:default",
+    "heliwatch:default",
+    "sql:default",
+    "sql:allow-execute"
+  ]
 }

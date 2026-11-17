@@ -18,7 +18,7 @@ pnpm android:doctor       # проверяет, что ничего не пот�
 |---|---|
 | `app/build.gradle.kts` | `compileSdk = 36`, `targetSdk = 36`, `minSdk = 26` |
 | `app/src/main/AndroidManifest.xml` | маркер `HW:PATCH:ACTIVITY`, `configChanges` + `density`, `windowSoftInputMode=adjustResize`, `resizeableActivity=true`, deep link `heliwatch://` (`HW:PATCH:DEEPLINK`) |
-| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` между маркерами `HW:PATCH:MAIN` |
+| `app/src/main/java/dev/heliwatch/app/MainActivity.kt` | `HeliWatchBridge.install(this)` и `onNewIntent → handleIntent` между маркерами `HW:PATCH:MAIN` / `HW:PATCH:INTENT` |
 | `app/src/main/res/values/strings.xml` | `app_name` и `main_activity_title` = «HeliWatch» |
 | `app/src/main/res/values*/themes.xml` | `Theme.Material3.Dark.NoActionBar`, тёмный `windowBackground`, прозрачные системные бары |
 | `app/src/main/res/values/hw_branding.xml` | цвета окна и иконки |
@@ -62,10 +62,17 @@ project(':tauri-plugin-heliwatch').projectDir = new File(rootDir, '../../plugins
    по списку прямоугольников из React, фиксирует её на весь жест и отдаёт события
    нужному WebView напрямую. Верхний прозрачный WebView больше не «съедает» тапы.
 4. `HeliWatchBridge.install(this)` в `MainActivity.onCreate` регистрирует
-   back-обработчик и launcher системного выбора файла (это нужно сделать до
-   `onStart`, поэтому именно в `onCreate`).
+   back-обработчик, launcher системного выбора файла и разбирает стартовый
+   `Intent` со ссылкой `heliwatch://r/<код>`. Повторное открытие ссылки при
+   `launchMode=singleTask` приходит в `onNewIntent` — там вызывается
+   `HeliWatchBridge.handleIntent(intent)` (маркер `HW:PATCH:INTENT`).
 5. Сайт стартует с прозрачной заглушки; React при монтировании шлёт
    `site_init` (исходник `site-hook.js`) и `site_load` (тестовая страница).
+6. SQLite открывается из JS через `@tauri-apps/plugin-sql`; миграции
+   (`src-tauri/src/db.rs`) регистрируются в Rust-плагине `tauri-plugin-sql` с
+   feature `sqlite` и применяются при `Database.load('sqlite:heliwatch.db')`.
+   В `capabilities/default.json` нужны `sql:default` и `sql:allow-execute`:
+   набор `sql:default` разрешает только load/select/close.
 
 ## Окружение (Windows, проверено)
 
@@ -91,8 +98,10 @@ APK: `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`.
 
 На машине без режима разработчика (и без права создавать символьные ссылки)
 `pnpm tauri android build --apk --debug` доходит до упаковки `.so` и падает:
-`Failed to create a symbolic link ... jniLibs`. Плюс `cc` может не собрать
-`vswhom-sys` с debug-информацией (`D8050`). Обход, которым собран APK 0.1.0:
+`Failed to create a symbolic link ... jniLibs`. Плюс `cc`/`cl.exe` может не
+собрать C-часть `libsqlite3-sys` (SQLite-плагин) или `vswhom-sys` с
+debug-информацией (`D8050`). Поэтому сборка идёт с `CARGO_PROFILE_DEV_DEBUG=0`.
+Обход, которым собран APK 0.2.0:
 
 ```powershell
 # 1. Сборка dist + Rust для arm64. Ошибка symlink в конце ожидаема:

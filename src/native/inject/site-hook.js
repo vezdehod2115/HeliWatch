@@ -20,6 +20,7 @@
   var TIME_UPDATE_MS = 1000;
   var VIDEO_EVENTS = [
     'play',
+    'playing',
     'pause',
     'seeking',
     'seeked',
@@ -30,6 +31,7 @@
     'ended',
     'volumechange',
     'waiting',
+    'canplay',
   ];
 
   var state = {
@@ -92,6 +94,9 @@
       duration: video && isFinite(video.duration) ? video.duration : 0,
       rate: video ? video.playbackRate || 1 : 1,
       muted: video ? !!video.muted : false,
+      width: video && video.videoWidth ? video.videoWidth : 0,
+      height: video && video.videoHeight ? video.videoHeight : 0,
+      src: video && video.currentSrc ? String(video.currentSrc).slice(0, 2048) : '',
     };
     if (extra) {
       for (var key in extra) {
@@ -241,6 +246,12 @@
             return false;
           }
           video.currentTime = Math.max(0, target);
+        } else if (name === 'seekBy') {
+          var delta = Number(cmd.delta);
+          if (!isFinite(delta)) {
+            return false;
+          }
+          video.currentTime = Math.max(0, (video.currentTime || 0) + delta);
         } else if (name === 'setRate') {
           var rate = Number(cmd.rate);
           if (!isFinite(rate) || rate < 0.25 || rate > 4) {

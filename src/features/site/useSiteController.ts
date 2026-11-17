@@ -10,8 +10,9 @@ import {
   subscribeSiteEvents,
 } from '../../native/siteBridge';
 import { isNativeRuntime } from '../../native/nativeBridge';
+import type { PlaybackAction } from '../../net/protocol';
 import { applySiteEvent } from './applySiteEvent';
-import { EMPTY_STATUS, type NavAction, type SiteStatus } from './types';
+import { EMPTY_STATUS, type NavAction, type SiteEvent, type SiteStatus } from './types';
 
 const notice = (text: string) => ({
   text,
@@ -21,23 +22,29 @@ const notice = (text: string) => ({
 export interface SiteController {
   status: SiteStatus;
   open: (input: string) => Promise<boolean>;
+  openUrl: (url: string) => Promise<boolean>;
   nav: (action: NavAction) => void;
   reload: () => void;
-  togglePlay: () => void;
-  seekBy: (seconds: number) => void;
+  applyPlayback: (action: PlaybackAction) => void;
   openTestPage: () => void;
   openYoutube: () => void;
+  /** Подписка на «сырые» события для синхронизации комнаты. */
+  onEvent: (listener: (event: SiteEvent) => void) => () => void;
 }
 
 /**
  * Старт нативного слоя: подписка на события, передача site-hook в Kotlin,
  * первая загрузка тестовой страницы. Повторно не запускается.
+ *
+ * Хук живёт в Shell всё время работы приложения, поэтому WebView сайта не
+ * перезагружается при переходе «главная → комната → главная».
  */
 export function useSiteController(): SiteController {
   const [status, setStatus] = useState<SiteStatus>(EMPTY_STATUS);
   const statusRef = useRef(status);
   statusRef.current = status;
   const booted = useRef(false);
+  const listeners = useRef(new Set<(event: SiteEvent) => void>());
 
   useEffect(() => {
     if (booted.current) {
@@ -58,8 +65,16 @@ export function useSiteController(): SiteController {
         return;
       }
       unlisten = await subscribeSiteEvents((event) => {
-        if (!disposed) {
-          setStatus((current) => applySiteEvent(current, event));
+        if (disposed) {
+          return;
+        }
+        setStatus((current) => applySiteEvent(current, event));
+        for (const listener of listeners.current) {
+          try {
+            listener(event);
+          } catch (error) {
+            console.warn('[heliwatch] обработчик события сайта упал', error);
+          }
         }
       });
       const ok = await initSite();
@@ -82,19 +97,36 @@ export function useSiteController(): SiteController {
     };
   }, []);
 
-  const open = useCallback(async (input: string): Promise<boolean> => {
-    const url = normalizeUrl(input);
+  const onEvent = useCallback((listener: (event: SiteEvent) => void) => {
+    listeners.current.add(listener);
+    return () => {
+      listeners.current.delete(listener);
+    };
+  }, []);
+
+  const openUrl = useCallback(async (url: string): Promise<boolean> => {
     if (!url) {
-      setStatus((current) => ({
-        ...current,
-        notice: notice('Не понял адрес: введите youtube.com или test'),
-      }));
       return false;
     }
     setStatus((current) => ({ ...current, loading: true }));
     await openSite(url);
     return true;
   }, []);
+
+  const open = useCallback(
+    async (input: string): Promise<boolean> => {
+      const url = normalizeUrl(input);
+      if (!url) {
+        setStatus((current) => ({
+          ...current,
+          notice: notice('Не понял адрес: введите youtube.com или test'),
+        }));
+        return false;
+      }
+      return openUrl(url);
+    },
+    [openUrl],
+  );
 
   const nav = useCallback((action: NavAction) => {
     void navigateSite(action);
@@ -104,32 +136,43 @@ export function useSiteController(): SiteController {
     void navigateSite('reload');
   }, []);
 
-  const togglePlay = useCallback(() => {
-    const cmd = statusRef.current.video.playing ? 'pause' : 'play';
-    void sendSiteCommand({ cmd });
-  }, []);
-
-  const seekBy = useCallback((seconds: number) => {
-    const target = Math.max(0, statusRef.current.video.time + seconds);
-    void sendSiteCommand({ cmd: 'seek', t: target });
+  /** Команда из сети: page-hook сам гасит эхо на 800 мс. */
+  const applyPlayback = useCallback((action: PlaybackAction) => {
+    switch (action.kind) {
+      case 'play':
+        void sendSiteCommand({ cmd: 'play' });
+        break;
+      case 'pause':
+        void sendSiteCommand({ cmd: 'pause' });
+        break;
+      case 'seek':
+        void sendSiteCommand({ cmd: 'seek', t: action.t ?? 0 });
+        break;
+      case 'rate':
+        void sendSiteCommand({ cmd: 'setRate', rate: action.rate ?? 1 });
+        break;
+      default:
+        break;
+    }
   }, []);
 
   const openTestPage = useCallback(() => {
-    void open(TEST_PAGE_URL);
-  }, [open]);
+    void openUrl(TEST_PAGE_URL);
+  }, [openUrl]);
 
   const openYoutube = useCallback(() => {
-    void open(YOUTUBE_URL);
-  }, [open]);
+    void openUrl(YOUTUBE_URL);
+  }, [openUrl]);
 
   return {
     status,
     open,
+    openUrl,
     nav,
     reload,
-    togglePlay,
-    seekBy,
+    applyPlayback,
     openTestPage,
     openYoutube,
+    onEvent,
   };
 }

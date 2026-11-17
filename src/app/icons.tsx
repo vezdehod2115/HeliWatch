@@ -8,7 +8,11 @@ export type IconName =
   | 'chevron-down'
   | 'chevron-up'
   | 'video'
-  | 'link';
+  | 'link'
+  | 'users'
+  | 'sync'
+  | 'copy'
+  | 'close';
 
 interface IconProps {
   name: IconName;
@@ -94,6 +98,35 @@ export function Icon({ name, size = 20 }: IconProps) {
         <svg {...common}>
           <path d="M10 14a4 4 0 0 0 5.66 0l2.5-2.5a4 4 0 0 0-5.66-5.66l-1.4 1.4" />
           <path d="M14 10a4 4 0 0 0-5.66 0L5.84 12.5a4 4 0 0 0 5.66 5.66l1.4-1.4" />
+        </svg>
+      );
+    case 'users':
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="8" r="3.2" />
+          <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
+          <path d="M16 5.6a3 3 0 0 1 0 5.8M17.5 19a5.4 5.4 0 0 0-2.2-4.3" />
+        </svg>
+      );
+    case 'sync':
+      return (
+        <svg {...common}>
+          <path d="M20 7v5h-5" />
+          <path d="M4 17v-5h5" />
+          <path d="M6.1 9a7 7 0 0 1 11.4-2L20 9M4 15l2.5 2a7 7 0 0 0 11.4-2" />
+        </svg>
+      );
+    case 'copy':
+      return (
+        <svg {...common}>
+          <rect x="9" y="9" width="11" height="11" rx="2.5" />
+          <path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9" />
+        </svg>
+      );
+    case 'close':
+      return (
+        <svg {...common}>
+          <path d="m6 6 12 12M18 6 6 18" />
         </svg>
       );
     default:
